@@ -281,6 +281,22 @@ let connected=false;
 let lastSnapshotSent=0;
 let connectionLost=false;
 
+function setPauseNotice(paused,text="호스트 창 비활성화 · 게임 일시정지"){
+  gamePaused=paused;
+  pauseBanner.textContent=text;
+  pauseBanner.classList.toggle("show",paused);
+}
+
+function shouldWarnBeforeExit(){
+  return (role==="host"||role==="guest") && (started||connected);
+}
+
+addEventListener("beforeunload",e=>{
+  if(!shouldWarnBeforeExit()) return;
+  e.preventDefault();
+  e.returnValue=true;
+});
+
 const params=new URLSearchParams(location.search);
 const joinId=params.get("join");
 
@@ -308,32 +324,42 @@ function startHost(){
     netText.textContent="게스트 대기";
   });
   peer.on("connection",c=>{
-    if(conn && conn.open){ c.close(); return; }
+    // 새로고침한 게스트가 이전 연결의 close 이벤트보다 먼저 들어올 수 있다.
+    // 최신 연결을 채택하고 이전 연결은 닫아 현재 게임 상태를 그대로 이어 준다.
+    const previous=conn;
     conn=c;
-    wireHostConnection();
+    wireHostConnection(c);
+    if(previous && previous!==c) try{ previous.close(); }catch(_){}
   });
   peer.on("error",err=>{
     setLobbyMessage("P2P 오류: "+err.type);
     netText.textContent="연결 오류";
   });
 }
-function wireHostConnection(){
-  conn.on("open",()=>{
+function wireHostConnection(c){
+  c.on("open",()=>{
+    if(conn!==c){ c.close(); return; }
     connected=true; connectionLost=false;
-    resetWorld();
+    const firstConnection=!started;
+    if(firstConnection) resetWorld();
     started=true;
     lobby.classList.add("hidden");
     netText.textContent="연결됨";
+    setPauseNotice(document.hidden||!document.hasFocus());
     sendHost({t:"hello",team:TEAM_RIGHT});
+    sendHost({t:"pause",paused:gamePaused});
     sendSnapshot(true);
-    centerCameraForTeam(localTeam);
+    if(firstConnection) centerCameraForTeam(localTeam);
   });
-  conn.on("data",msg=>handleGuestMessage(msg));
-  conn.on("close",()=>{
+  c.on("data",msg=>{ if(conn===c) handleGuestMessage(msg); });
+  c.on("close",()=>{
+    if(conn!==c) return;
     connected=false; connectionLost=true;
     netText.textContent="연결 끊김";
+    pauseBanner.textContent="게스트와 연결이 끊겼습니다 · 재접속을 기다리는 중";
+    pauseBanner.classList.add("show");
   });
-  conn.on("error",()=>{ netText.textContent="연결 오류"; });
+  c.on("error",()=>{ if(conn===c) netText.textContent="연결 오류"; });
 }
 function sendHost(obj){
   if(conn && conn.open) try{ conn.send(obj); }catch(_){}
@@ -352,6 +378,7 @@ function startGuest(hostId){
       connected=true; connectionLost=false;
       setLobbyMessage("연결 완료. 호스트 상태를 기다리는 중...");
       netText.textContent="연결됨";
+      pauseBanner.classList.remove("show");
     });
     conn.on("data",msg=>handleHostMessage(msg));
     conn.on("close",()=>{
@@ -441,6 +468,8 @@ function handleHostMessage(msg){
   if(msg.t==="hello"){
     localTeam=msg.team;
     teamText.textContent="오른쪽 / 게스트";
+  }else if(msg.t==="pause"){
+    setPauseNotice(!!msg.paused,"호스트가 다른 창을 보고 있어 게임이 일시정지되었습니다");
   }else if(msg.t==="state"){
     const first=!started;
     units=syncArrayInPlace(units,msg.units||[],"unit");
@@ -453,9 +482,7 @@ function handleHostMessage(msg){
     teamResources=msg.teamResources||teamResources;
     gameOver=!!msg.gameOver;
     winnerTeam=msg.winnerTeam;
-    gamePaused=!!msg.paused;
-    pauseBanner.textContent="호스트 창 비활성화 · 게임 일시정지";
-    pauseBanner.classList.toggle("show",gamePaused);
+    setPauseNotice(!!msg.paused,"호스트가 다른 창을 보고 있어 게임이 일시정지되었습니다");
     started=true;
     lobby.classList.add("hidden");
     if(first) centerCameraForTeam(localTeam);
@@ -904,14 +931,17 @@ function updateCamera(dt){
   clampCamera();
 }
 
-/* 호스트 탭이 백그라운드면 단순 일시정지 */
-document.addEventListener("visibilitychange",()=>{
-  if(role==="host"){
-    gamePaused=document.hidden;
-    pauseBanner.classList.toggle("show",gamePaused);
-    sendSnapshot(true);
-  }
-});
+/* 호스트 창이 백그라운드면 일시정지 상태를 별도 메시지로 즉시 알린다. */
+function updateHostWindowPause(){
+  if(role!=="host"||!started) return;
+  const paused=document.hidden||!document.hasFocus();
+  setPauseNotice(paused);
+  sendHost({t:"pause",paused});
+  sendSnapshot(true);
+}
+document.addEventListener("visibilitychange",updateHostWindowPause);
+addEventListener("blur",updateHostWindowPause);
+addEventListener("focus",updateHostWindowPause);
 
 /* =========================
    렌더링

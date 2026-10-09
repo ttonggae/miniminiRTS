@@ -355,6 +355,7 @@ function makeUnit(type,team,x,y){
     id:nextId++, kind:"unit", type, team, x,y, renderX:x, renderY:y,
     hp:s.hp,maxHp:s.hp,radius:s.radius, orders:[], cooldown:0,
     carry:0,gatherPhase:"toNode",gatherTargetId:null,gatherTick:0,
+    gatherPath:[],gatherPathIndex:0,gatherPathKey:"",gatherPathFailed:false,gatherPathBlocked:0,
     shotCount:0,lastFireAt:-999,lastRepairAt:0
   };
   units.push(u); return u;
@@ -822,8 +823,52 @@ function positionClearOfBlockedTerrain(x,y,radius){
 function canStep(ox,oy,nx,ny,radius){
   if(!positionClearOfBlockedTerrain(nx,ny,radius)) return false;
   const a=tileAtWorld(ox,oy),b=tileAtWorld(nx,ny);
-  if((a===GROUND&&b===HILL)||(a===HILL&&b===GROUND)) return false;
-  return true;
+  return canTraverseTerrain(a,b);
+}
+function movementTerrain(t){ return t===RESOURCE?GROUND:t; }
+function canTraverseTerrain(from,to){
+  if(isTerrainBlocked(to)) return false;
+  const a=movementTerrain(from),b=movementTerrain(to);
+  return !((a===GROUND&&b===HILL)||(a===HILL&&b===GROUND));
+}
+function findShortestTilePath(startX,startY,targetX,targetY,radius,arrivalRadius=0){
+  const sx=Math.max(0,Math.min(MAP_W-1,Math.floor(startX/TILE)));
+  const sy=Math.max(0,Math.min(MAP_H-1,Math.floor(startY/TILE)));
+  const gx=Math.max(0,Math.min(MAP_W-1,Math.floor(targetX/TILE)));
+  const gy=Math.max(0,Math.min(MAP_H-1,Math.floor(targetY/TILE)));
+  const targetTile=gy*MAP_W+gx;
+  const start=sy*MAP_W+sx,total=MAP_W*MAP_H;
+  const isGoal=index=>{
+    if(arrivalRadius<=0) return index===targetTile;
+    const tx=index%MAP_W,ty=Math.floor(index/MAP_W);
+    return Math.hypot((tx+.5)*TILE-targetX,(ty+.5)*TILE-targetY)<=arrivalRadius;
+  };
+  if(isGoal(start)) return [];
+  const cameFrom=new Int32Array(total); cameFrom.fill(-1); cameFrom[start]=start;
+  const queue=new Int32Array(total); let head=0,tail=0; queue[tail++]=start;
+  const directions=[[1,0],[-1,0],[0,1],[0,-1]];
+  let goal=-1;
+  while(head<tail&&goal===-1){
+    const current=queue[head++],cx=current%MAP_W,cy=Math.floor(current/MAP_W);
+    for(const [dx,dy] of directions){
+      const nx=cx+dx,ny=cy+dy;
+      if(nx<0||ny<0||nx>=MAP_W||ny>=MAP_H) continue;
+      const next=ny*MAP_W+nx;
+      if(cameFrom[next]!==-1||!canTraverseTerrain(terrain[cy][cx],terrain[ny][nx])) continue;
+      const wx=(nx+.5)*TILE,wy=(ny+.5)*TILE;
+      if(!positionClearOfBlockedTerrain(wx,wy,radius)) continue;
+      cameFrom[next]=current; queue[tail++]=next;
+      if(isGoal(next)){goal=next;break;}
+    }
+  }
+  if(goal===-1) return null;
+  const path=[];
+  for(let current=goal;current!==start;current=cameFrom[current]){
+    const tx=current%MAP_W,ty=Math.floor(current/MAP_W);
+    path.push({x:(tx+.5)*TILE,y:(ty+.5)*TILE});
+  }
+  path.reverse();
+  return path;
 }
 function hasLineOfSight(ax,ay,bx,by){
   const sourceTerrain=tileAtWorld(ax,ay);
@@ -851,10 +896,14 @@ function pointVisibleTo(team,x,y){
 function entityVisibleTo(team,e){ return e.team===team || pointVisibleTo(team,e.x,e.y); }
 function resourceVisibleTo(team,resource){ return resource.team===team || pointVisibleTo(team,resource.x,resource.y); }
 
+function invalidateGatherPath(u){
+  u.gatherPath=[];u.gatherPathIndex=0;u.gatherPathKey="";u.gatherPathFailed=false;u.gatherPathBlocked=0;
+}
 function startGather(u,node){
   if(!node||node.amount<=0) return;
   u.orders=[{type:"gather",targetId:node.id}];
   u.gatherTargetId=node.id; u.gatherPhase="toNode"; u.gatherTick=0;
+  invalidateGatherPath(u);
 }
 function activeMinerCount(nodeId){
   return units.filter(u=>u.hp>0&&u.type==="worker"&&u.gatherPhase==="mining"&&u.orders[0]?.type==="gather"&&u.orders[0].targetId===nodeId).length;
@@ -862,6 +911,7 @@ function activeMinerCount(nodeId){
 function finishGatherOrder(u){
   if(u.orders[0]?.type==="gather") u.orders.shift();
   u.gatherTargetId=null; u.gatherPhase="toNode"; u.gatherTick=0;
+  invalidateGatherPath(u);
 }
 function moveToward(u,tx,ty,dt){
   const dx=tx-u.x,dy=ty-u.y,d=Math.hypot(dx,dy);
@@ -871,6 +921,42 @@ function moveToward(u,tx,ty,dt){
   if(canStep(u.x,u.y,nx,ny,u.radius)){u.x=nx;u.y=ny;}
   else return false; // 길찾기 없음
   return d<=UNIT_TYPES[u.type].speed*dt+2;
+}
+function moveGatherAlongPath(u,tx,ty,arrivalRadius,dt){
+  if(Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius) return true;
+  const goalX=Math.max(0,Math.min(MAP_W-1,Math.floor(tx/TILE)));
+  const goalY=Math.max(0,Math.min(MAP_H-1,Math.floor(ty/TILE)));
+  const pathKey=`${u.gatherPhase}:${goalX},${goalY}`;
+  if(u.gatherPathKey!==pathKey){
+    const path=findShortestTilePath(u.x,u.y,tx,ty,u.radius,arrivalRadius);
+    u.gatherPathKey=pathKey;u.gatherPathIndex=0;u.gatherPathBlocked=0;
+    u.gatherPathFailed=path===null;
+    u.gatherPath=path||[];
+    if(path){
+      const startCenter={x:(Math.floor(u.x/TILE)+.5)*TILE,y:(Math.floor(u.y/TILE)+.5)*TILE};
+      if(Math.hypot(u.x-startCenter.x,u.y-startCenter.y)>3) u.gatherPath.unshift(startCenter);
+    }
+  }
+  if(u.gatherPathFailed) return false;
+  while(u.gatherPathIndex<u.gatherPath.length){
+    const waypoint=u.gatherPath[u.gatherPathIndex];
+    if(Math.hypot(u.x-waypoint.x,u.y-waypoint.y)<=3){u.gatherPathIndex++;continue;}
+    const beforeX=u.x,beforeY=u.y;
+    moveToward(u,waypoint.x,waypoint.y,dt);
+    if(Math.hypot(u.x-beforeX,u.y-beforeY)<.01){
+      u.gatherPathBlocked+=dt;
+      if(u.gatherPathBlocked>.45) invalidateGatherPath(u);
+    }else u.gatherPathBlocked=0;
+    return false;
+  }
+  if(Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius) return true;
+  const beforeX=u.x,beforeY=u.y;
+  moveToward(u,tx,ty,dt);
+  if(Math.hypot(u.x-beforeX,u.y-beforeY)<.01){
+    u.gatherPathBlocked+=dt;
+    if(u.gatherPathBlocked>.45) invalidateGatherPath(u);
+  }else u.gatherPathBlocked=0;
+  return Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius;
 }
 function nearestAttackable(u,maxRange){
   let best=null,bd=Infinity;
@@ -958,9 +1044,10 @@ function updateGather(u,o,dt){
   if(!node||!hq||hq.hp<=0) return;
   if(node.amount<=0&&u.carry<=0){ finishGatherOrder(u); return; }
   if(u.gatherPhase==="toNode"){
-    if(moveToward(u,node.x,node.y,dt)||Math.hypot(u.x-node.x,u.y-node.y)<node.radius+12){
+    if(moveGatherAlongPath(u,node.x,node.y,node.radius+12,dt)){
       u.gatherPhase=activeMinerCount(node.id)<MAX_MINERS_PER_NODE?"mining":"waiting";
       u.gatherTick=0;
+      invalidateGatherPath(u);
     }
   }else if(u.gatherPhase==="waiting"){
     if(node.amount<=0) finishGatherOrder(u);
@@ -974,15 +1061,15 @@ function updateGather(u,o,dt){
       u.carry+=mined;
       node.amount=Math.max(0,node.amount-mined);
       if(u.carry>=5||node.amount<=0){
-        if(u.carry>0) u.gatherPhase="toHQ";
+        if(u.carry>0){u.gatherPhase="toHQ";invalidateGatherPath(u);}
         else finishGatherOrder(u);
       }
     }
   }else if(u.gatherPhase==="toHQ"){
-    if(moveToward(u,hq.x,hq.y,dt)||Math.hypot(u.x-hq.x,u.y-hq.y)<hq.radius+18){
+    if(moveGatherAlongPath(u,hq.x,hq.y,hq.radius+18,dt)){
       teamResources[u.team]+=u.carry;
       u.carry=0;
-      if(node.amount>0) u.gatherPhase="toNode";
+      if(node.amount>0){u.gatherPhase="toNode";invalidateGatherPath(u);}
       else finishGatherOrder(u);
     }
   }
@@ -999,6 +1086,10 @@ function autoRepair(u,dt){
   if(best){
     best.hp=Math.min(best.maxHp,best.hp+3*dt);
   }
+}
+function workersIgnoreCollisionWhileGathering(a,b){
+  return a.type==="worker"&&b.type==="worker"&&
+    (a.orders[0]?.type==="gather"||b.orders[0]?.type==="gather");
 }
 function updateUnits(dt,nowSec){
   for(const u of units){
@@ -1030,6 +1121,7 @@ function updateUnits(dt,nowSec){
     const a=units[i]; if(a.hp<=0)continue;
     for(let j=i+1;j<units.length;j++){
       const b=units[j]; if(b.hp<=0||a.team!==b.team)continue;
+      if(workersIgnoreCollisionWhileGathering(a,b)) continue;
       const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),minD=(a.radius+b.radius)*.75;
       if(d>0&&d<minD){
         const push=(minD-d)*.16,nx=dx/d,ny=dy/d;

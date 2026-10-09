@@ -36,6 +36,21 @@
     cursor:pointer; font-weight:700;
   }
   #resetGuestBtn { top:122px; display:none; background:rgba(74,35,35,.88); }
+  #practiceTools {
+    position:fixed; right:12px; top:122px; z-index:6; display:none;
+    width:190px; padding:9px; gap:7px; flex-direction:column;
+    border:1px solid rgba(255,255,255,.14); border-radius:9px;
+    background:rgba(7,10,13,.88); color:#dff6ff; font-size:12px;
+  }
+  #practiceTools.show { display:flex; }
+  #practiceTools button {
+    padding:7px 9px; border:1px solid rgba(255,255,255,.14); border-radius:7px;
+    background:#28343c; color:#dbe7ed; cursor:pointer; font-weight:700;
+  }
+  #practiceTools button.active {
+    color:#edffff; border-color:#6de4ff; background:rgba(18,77,96,.94);
+    box-shadow:0 0 8px rgba(75,216,255,.58),inset 0 0 8px rgba(119,232,255,.12);
+  }
   #fullscreenBtn.locked {
     color:#e9fbff; border-color:#6de4ff; background:rgba(18,77,96,.92);
     box-shadow:0 0 8px rgba(75,216,255,.95),0 0 20px rgba(75,216,255,.58),inset 0 0 10px rgba(119,232,255,.18);
@@ -112,6 +127,11 @@
 <div id="status">네트워크: <strong id="netText">대기</strong><br>진영: <span id="teamText">-</span><br>맵: <span id="mapText">-</span></div>
 <button id="fullscreenBtn">전체화면 + 마우스 잠금</button>
 <button id="resetGuestBtn">게스트 자리 초기화</button>
+<div id="practiceTools">
+  <strong>연습모드 설정</strong>
+  <button id="infiniteResourcesBtn">자원 무한: 꺼짐</button>
+  <button id="instantBuildBtn">생산·건설 대기시간 없음: 꺼짐</button>
+</div>
 <div id="pauseBanner">호스트 창 비활성화 · 게임 일시정지</div>
 
 <div id="lobby">
@@ -130,7 +150,7 @@
     </div>
     <div class="row" id="startButtons">
       <button id="hostBtn">호스트 방 만들기</button>
-      <button id="soloBtn" class="secondary">혼자 테스트</button>
+      <button id="soloBtn" class="secondary">연습모드</button>
     </div>
     <div id="inviteWrap">
       <p>아래 링크를 상대에게 보내세요.</p>
@@ -160,6 +180,9 @@ const invite = document.getElementById("invite");
 const copyBtn = document.getElementById("copyBtn");
 const fullscreenBtn = document.getElementById("fullscreenBtn");
 const resetGuestBtn = document.getElementById("resetGuestBtn");
+const practiceTools = document.getElementById("practiceTools");
+const infiniteResourcesBtn = document.getElementById("infiniteResourcesBtn");
+const instantBuildBtn = document.getElementById("instantBuildBtn");
 const netText = document.getElementById("netText");
 const teamText = document.getElementById("teamText");
 const mapText = document.getElementById("mapText");
@@ -229,18 +252,27 @@ const MAX_MINERS_PER_NODE=5;
 const HILL_DAMAGE_MULT = 0.70;
 const NAV_CLEARANCE=12;
 const MIN_NAV_CLEARANCE=4;
-const NAV_PLAN_COUNT_BUDGET=4;
+const NAV_PLAN_COUNT_BUDGET=8;
 const NAV_PLAN_TIME_BUDGET_MS=2.5;
+const NAV_JOB_SLICE_MS=.35;
 const NAV_CACHE_TTL_MS=400;
 const NAV_FAILED_CACHE_TTL_MS=Infinity;
 const NAV_CACHE_LIMIT=192;
+const NAV_SHARED_FIELD_LIMIT=24;
+const NAV_SHARED_FIELD_IDLE_MS=6000;
+const NAV_SHARED_GOAL_BUCKET=16;
 const MAP_STORAGE_KEY="miniLinkRTS.customMaps.v3";
 let terrain=[];
 let activeMap=null;
 let availableMaps=[];
 let selectedMapId="default";
-let navPlansThisFrame=0,navPlanTimeThisFrame=0,navFrameNow=0,navCacheLastPrune=0;
+let navPlansThisFrame=0,navPlanTimeThisFrame=0,navFrameNow=0,navCacheLastPrune=0,navFrameSerial=0;
 const navPathCache=new Map();
+const navSharedFieldCache=new Map();
+const navTerrainWalkabilityCache=new Map();
+const navTerrainEdgeCache=new Map();
+const navPendingJobs=[];
+let navObstacleRevision=0;
 
 function isTerrainBlocked(t){ return t===WALL||t===WATER||t===VOID; }
 
@@ -342,7 +374,7 @@ function applyMapData(map){
   TILE=map.tileSize; MAP_W=map.width; MAP_H=map.height;
   WORLD_W=MAP_W*TILE; WORLD_H=MAP_H*TILE;
   terrain=map.tiles.map(row=>row.slice());
-  clearNavigationCache();
+  clearNavigationCache(true);
   mapText.textContent=map.name;
 }
 
@@ -419,7 +451,7 @@ function makeUnit(type,team,x,y){
     id:nextId++, kind:"unit", type, team, x,y, renderX:x, renderY:y,
     hp:s.hp,maxHp:s.hp,radius:s.radius, orders:[], cooldown:0,
     carry:0,gatherPhase:"toNode",gatherTick:0,
-    navPath:[],navPathIndex:0,navPathKey:"",navPathFailedKey:"",navPathRetry:0,navPathRadius:s.radius,
+    navPath:[],navPathIndex:0,navPathKey:"",navPathFailedKey:"",navPathRetry:0,navPathRadius:s.radius,navWaiting:false,
     navGoalX:x,navGoalY:y,navGoalProjected:false,
     shotCount:0,lastFireAt:-999
   };
@@ -574,12 +606,43 @@ renderMapList();
 ========================= */
 let role="menu";      // menu | host | guest | solo
 let localTeam=TEAM_LEFT;
+let practiceInfiniteResources=false,practiceInstantBuild=false;
 let peer=null, conn=null;
 let connected=false;
 let lastSnapshotSent=0;
 let connectionLost=false;
 let guestSessionToken=null;
 const GUEST_TOKEN_PREFIX="miniLinkRTS.guestToken.";
+
+function practiceModeFor(team){return role==="solo"&&team===localTeam;}
+function hasResources(team,cost){return (practiceModeFor(team)&&practiceInfiniteResources)||teamResources[team]>=cost;}
+function spendResources(team,cost){if(!(practiceModeFor(team)&&practiceInfiniteResources))teamResources[team]-=cost;}
+function instantBuildFor(team){return practiceModeFor(team)&&practiceInstantBuild;}
+function updatePracticeTools(){
+  practiceTools.classList.toggle("show",role==="solo");
+  infiniteResourcesBtn.textContent=`자원 무한: ${practiceInfiniteResources?"켜짐":"꺼짐"}`;
+  instantBuildBtn.textContent=`생산·건설 대기시간 없음: ${practiceInstantBuild?"켜짐":"꺼짐"}`;
+  infiniteResourcesBtn.classList.toggle("active",practiceInfiniteResources);
+  instantBuildBtn.classList.toggle("active",practiceInstantBuild);
+}
+function finishPracticeConstruction(){
+  for(const building of buildings){
+    if(building.team!==localTeam||building.hp<=0)continue;
+    if(!building.complete){building.complete=true;building.buildRemaining=0;building.hp=building.maxHp;}
+    for(const queued of building.queue||[])queued.time=0;
+  }
+}
+infiniteResourcesBtn.onclick=()=>{
+  if(role!=="solo")return;
+  practiceInfiniteResources=!practiceInfiniteResources;
+  updatePracticeTools();
+};
+instantBuildBtn.onclick=()=>{
+  if(role!=="solo")return;
+  practiceInstantBuild=!practiceInstantBuild;
+  if(practiceInstantBuild)finishPracticeConstruction();
+  updatePracticeTools();
+};
 
 function setPauseNotice(paused,text="호스트 창 비활성화 · 게임 일시정지"){
   gamePaused=paused;
@@ -642,6 +705,7 @@ function startHost(){
   applyMapData(chosenMap);
   setMapSelectionLocked(true);
   role="host"; localTeam=TEAM_LEFT; teamText.textContent="왼쪽 / 호스트";
+  practiceInfiniteResources=false;practiceInstantBuild=false;updatePracticeTools();
   resetGuestBtn.style.display="block";
   hostBtn.disabled=true; soloBtn.disabled=true;
   setLobbyMessage("P2P 방을 만드는 중...");
@@ -694,6 +758,7 @@ function sendHost(obj){
 
 function startGuest(hostId){
   role="guest"; localTeam=TEAM_RIGHT; teamText.textContent="오른쪽 / 게스트";
+  practiceInfiniteResources=false;practiceInstantBuild=false;updatePracticeTools();
   hostBtn.style.display="none"; soloBtn.style.display="none";
   mapPicker.style.display="none";
   setLobbyMessage("호스트에 연결 중...");
@@ -763,10 +828,12 @@ function startSolo(){
   applyMapData(chosenMap);
   setMapSelectionLocked(true);
   role="solo"; localTeam=TEAM_LEFT; connected=true; started=true;
+  practiceInfiniteResources=false;practiceInstantBuild=false;
   resetWorld();
   lobby.classList.add("hidden");
-  netText.textContent="싱글 테스트";
-  teamText.textContent="왼쪽 / 테스트";
+  netText.textContent="연습모드";
+  teamText.textContent="왼쪽 / 연습";
+  updatePracticeTools();
   centerCameraForTeam(localTeam);
 }
 
@@ -947,10 +1014,14 @@ function applyCommand(team,cmd){
     const builders=unitsForIds(team,cmd.ids).filter(u=>u.type==="worker");
     const x=Math.max(8,Math.min(WORLD_W-8,Number(cmd.x)||0));
     const y=Math.max(8,Math.min(WORLD_H-8,Number(cmd.y)||0));
-    if(!s||type==="hq"||!builders.length||teamResources[team]<s.cost||!canPlaceBuilding(type,x,y)) return;
-    teamResources[team]-=s.cost;
-    const building=makeBuilding(type,team,x,y,false);
-    for(const u of builders){u.orders=[{type:"build",targetId:building.id,x,y}];invalidateNavPath(u);}
+    if(!s||type==="hq"||!builders.length||!hasResources(team,s.cost)||!canPlaceBuilding(type,x,y)) return;
+    spendResources(team,s.cost);
+    const instant=instantBuildFor(team);
+    const building=makeBuilding(type,team,x,y,instant);
+    for(const u of builders){
+      u.orders=instant?[]:[{type:"build",targetId:building.id,x,y}];
+      invalidateNavPath(u);
+    }
   }else if(cmd.type==="assistBuild"){
     const building=getEntity(Number(cmd.targetId));
     if(!building||building.kind!=="building"||building.team!==team||building.complete) return;
@@ -1024,6 +1095,16 @@ function positionClearOfBuildings(x,y,radius,ignoreBuildingId=null){
   }
   return true;
 }
+function segmentClearOfBuildings(ax,ay,bx,by,radius,ignoreBuildingId=null){
+  const dx=bx-ax,dy=by-ay,lengthSq=dx*dx+dy*dy;
+  for(const b of buildings){
+    if(b.hp<=0||b.id===ignoreBuildingId)continue;
+    const t=lengthSq>0?Math.max(0,Math.min(1,((b.x-ax)*dx+(b.y-ay)*dy)/lengthSq)):0;
+    const x=ax+dx*t,y=ay+dy*t;
+    if(Math.hypot(x-b.x,y-b.y)<radius+b.radius+2)return false;
+  }
+  return true;
+}
 function positionClearForUnit(x,y,radius,ignoreBuildingId=null){
   return positionClearOfBlockedTerrain(x,y,radius)&&positionClearOfBuildings(x,y,radius,ignoreBuildingId);
 }
@@ -1043,9 +1124,11 @@ function nearestClearPositionAround(x,y,radius,preferX=x,preferY=y,maxDistance=T
   }
   return null;
 }
-function recoverStuckUnit(u,preferX,preferY){
+function recoverStuckUnit(u){
   if(positionClearForUnit(u.x,u.y,u.radius))return true;
-  const escape=nearestClearPositionAround(u.x,u.y,u.radius,preferX,preferY,TILE*4);
+  const direction=movementBoundaryEscapeDirection(u);
+  const escape=nearestClearPositionAround(u.x,u.y,u.radius,
+    u.x+direction.x*TILE,u.y+direction.y*TILE,TILE*4);
   if(!escape)return false;
   u.x=escape.x;u.y=escape.y;
   if(Number.isFinite(u.renderX)){u.renderX=escape.x;u.renderY=escape.y;}
@@ -1057,23 +1140,31 @@ function canStep(ox,oy,nx,ny,radius,ignoreBuildingId=null){
   const a=tileAtWorld(ox,oy),b=tileAtWorld(nx,ny);
   return canTraverseTerrain(a,b);
 }
+function canStepTerrainOnly(ox,oy,nx,ny,radius){
+  if(!positionClearOfBlockedTerrain(nx,ny,radius))return false;
+  return canTraverseTerrain(tileAtWorld(ox,oy),tileAtWorld(nx,ny));
+}
 function movementTerrain(t){ return t===RESOURCE?GROUND:t; }
 function canTraverseTerrain(from,to){
   if(isTerrainBlocked(to)) return false;
   const a=movementTerrain(from),b=movementTerrain(to);
   return !((a===GROUND&&b===HILL)||(a===HILL&&b===GROUND));
 }
-function segmentClearForUnit(ax,ay,bx,by,radius,ignoreBuildingId=null){
+function segmentClearOfTerrain(ax,ay,bx,by,radius){
   const dx=bx-ax,dy=by-ay,distance=Math.hypot(dx,dy);
-  if(distance<1)return positionClearForUnit(bx,by,radius,ignoreBuildingId);
+  if(distance<1)return positionClearOfBlockedTerrain(bx,by,radius);
   const steps=Math.max(1,Math.ceil(distance/Math.max(6,radius*.55)));
   let ox=ax,oy=ay;
   for(let i=1;i<=steps;i++){
     const nx=ax+dx*i/steps,ny=ay+dy*i/steps;
-    if(!canStep(ox,oy,nx,ny,radius,ignoreBuildingId))return false;
+    if(!canStepTerrainOnly(ox,oy,nx,ny,radius))return false;
     ox=nx;oy=ny;
   }
   return true;
+}
+function segmentClearForUnit(ax,ay,bx,by,radius,ignoreBuildingId=null){
+  return segmentClearOfTerrain(ax,ay,bx,by,radius)&&
+    segmentClearOfBuildings(ax,ay,bx,by,radius,ignoreBuildingId);
 }
 function chooseApproachPoint(u,tx,ty,arrivalRadius,navigationRadius=u.radius){
   const s=UNIT_TYPES[u.type];
@@ -1095,17 +1186,47 @@ function chooseApproachPoint(u,tx,ty,arrivalRadius,navigationRadius=u.radius){
   return best;
 }
 const NAV_DIRECTIONS=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
-const navSearchScratch={total:0,stamp:0,gScore:null,parent:null,seen:null,closed:null,walkableSeen:null,walkable:null,heapIndex:[],heapF:[]};
-function clearNavigationCache(){navPathCache.clear();}
-function beginNavigationFrame(now){
-  navPlansThisFrame=0;navPlanTimeThisFrame=0;navFrameNow=now;
-  if(now-navCacheLastPrune<1000)return;
-  navCacheLastPrune=now;
-  for(const [key,entry] of navPathCache){
-    const ttl=entry.path?NAV_CACHE_TTL_MS:NAV_FAILED_CACHE_TTL_MS;
-    if(now-entry.time>ttl)navPathCache.delete(key);
+function clearNavigationCache(clearTerrain=false){
+  navObstacleRevision++;
+  navPathCache.clear();navSharedFieldCache.clear();navPendingJobs.length=0;
+  if(clearTerrain){navTerrainWalkabilityCache.clear();navTerrainEdgeCache.clear();}
+}
+function trimNavigationCache(){
+  while(navPathCache.size>NAV_CACHE_LIMIT){
+    let removed=false;
+    for(const [key,entry] of navPathCache){
+      if(entry.status==="pending")continue;
+      navPathCache.delete(key);removed=true;break;
+    }
+    if(!removed)break;
   }
-  while(navPathCache.size>NAV_CACHE_LIMIT)navPathCache.delete(navPathCache.keys().next().value);
+}
+function trimSharedNavigationCache(){
+  while(navSharedFieldCache.size>NAV_SHARED_FIELD_LIMIT){
+    let oldestKey=null,oldestTime=Infinity;
+    for(const [key,entry] of navSharedFieldCache){
+      if(entry.status==="pending")continue;
+      if(entry.lastUsedTime<oldestTime){oldestTime=entry.lastUsedTime;oldestKey=key;}
+    }
+    if(oldestKey===null)break;
+    navSharedFieldCache.delete(oldestKey);
+  }
+}
+function beginNavigationFrame(now){
+  navPlansThisFrame=0;navPlanTimeThisFrame=0;navFrameNow=now;navFrameSerial++;
+  if(now-navCacheLastPrune>=1000){
+    navCacheLastPrune=now;
+    for(const [key,entry] of navPathCache){
+      if(entry.status==="pending")continue;
+      const ttl=entry.path?NAV_CACHE_TTL_MS:NAV_FAILED_CACHE_TTL_MS;
+      if(now-entry.time>ttl)navPathCache.delete(key);
+    }
+    for(const [key,entry] of navSharedFieldCache){
+      if(entry.status!=="pending"&&now-entry.lastUsedTime>NAV_SHARED_FIELD_IDLE_MS)navSharedFieldCache.delete(key);
+    }
+    trimNavigationCache();
+    trimSharedNavigationCache();
+  }
 }
 function navigationCacheKey(startX,startY,goalX,goalY,radius,startRadius,allowClosest){
   const cell=Math.max(20,TILE/2);
@@ -1117,131 +1238,375 @@ function cachedPathCanStart(startX,startY,path,radius,startRadius){
   return segmentClearForUnit(startX,startY,path[0].x,path[0].y,checkRadius);
 }
 function requestSmoothPath(startX,startY,goalX,goalY,radius,startRadius=radius,allowClosest=false){
-  if(segmentClearForUnit(startX,startY,goalX,goalY,radius))return[{x:goalX,y:goalY}];
   const now=navFrameNow||performance.now();
   const cacheKey=navigationCacheKey(startX,startY,goalX,goalY,radius,startRadius,allowClosest);
   const cached=navPathCache.get(cacheKey);
   if(cached){
+    if(cached.status==="pending"){cached.lastRequestedFrame=navFrameSerial;return undefined;}
     const ttl=cached.path?NAV_CACHE_TTL_MS:NAV_FAILED_CACHE_TTL_MS;
     if(now-cached.time<=ttl){
       if(cached.path&&cachedPathCanStart(startX,startY,cached.path,radius,startRadius))return cached.path;
       if(!cached.path&&(cached.shareFailure||Math.hypot(startX-cached.startX,startY-cached.startY)<=4))return null;
     }else navPathCache.delete(cacheKey);
   }
-  if(navPlansThisFrame>=NAV_PLAN_COUNT_BUDGET||navPlanTimeThisFrame>=NAV_PLAN_TIME_BUDGET_MS)return undefined;
-  navPlansThisFrame++;
-  const startedAt=performance.now();
-  const path=findSmoothPath(startX,startY,goalX,goalY,radius,startRadius,allowClosest);
-  navPlanTimeThisFrame+=performance.now()-startedAt;
-  navPathCache.set(cacheKey,{
-    time:now,path,startX,startY,
-    shareFailure:!!path||positionClearForUnit(startX,startY,startRadius)
-  });
-  while(navPathCache.size>NAV_CACHE_LIMIT)navPathCache.delete(navPathCache.keys().next().value);
-  return path;
-}
-function prepareNavSearch(total){
-  if(navSearchScratch.total!==total){
-    navSearchScratch.total=total;navSearchScratch.stamp=0;
-    navSearchScratch.gScore=new Float64Array(total);navSearchScratch.parent=new Int32Array(total);
-    navSearchScratch.seen=new Uint32Array(total);navSearchScratch.closed=new Uint32Array(total);
-    navSearchScratch.walkableSeen=new Uint32Array(total);navSearchScratch.walkable=new Uint8Array(total);
-  }
-  navSearchScratch.stamp++;
-  if(navSearchScratch.stamp>=0xffffffff){
-    navSearchScratch.seen.fill(0);navSearchScratch.closed.fill(0);navSearchScratch.walkableSeen.fill(0);navSearchScratch.stamp=1;
-  }
-  return navSearchScratch;
-}
-function findSmoothPath(startX,startY,goalX,goalY,radius,startRadius=radius,allowClosest=false){
   if(segmentClearForUnit(startX,startY,goalX,goalY,radius))return[{x:goalX,y:goalY}];
+  const entry={
+    key:cacheKey,status:"pending",time:now,path:undefined,job:null,
+    lastRequestedFrame:navFrameSerial,
+    params:{startX,startY,goalX,goalY,radius,startRadius,allowClosest}
+  };
+  navPathCache.set(cacheKey,entry);navPendingJobs.push(entry);trimNavigationCache();
+  return undefined;
+}
+function sharedNavigationKey(goalX,goalY,radius,requiredTerrain,allowClosest){
+  return `${navObstacleRevision}:${Math.round(goalX/NAV_SHARED_GOAL_BUCKET)},${Math.round(goalY/NAV_SHARED_GOAL_BUCKET)}:${Math.round(radius)}:${requiredTerrain??"any"}:${allowClosest?1:0}`;
+}
+function sharedTerrainNodeIsClear(job,index,x,y){
+  const terrainKey=`${job.step}:${Math.round(job.radius*2)/2}:${job.cols}x${job.rows}`;
+  let cached=navTerrainWalkabilityCache.get(terrainKey);
+  if(!cached){cached=new Uint8Array(job.total);navTerrainWalkabilityCache.set(terrainKey,cached);}
+  if(cached[index]===0)cached[index]=positionClearOfBlockedTerrain(x,y,job.radius)?2:1;
+  return cached[index]===2;
+}
+function sharedTerrainEdgeIsClear(job,index,next,direction,x,y,nextX,nextY){
+  const terrainKey=`${job.step}:${Math.round(job.radius*2)/2}:${job.cols}x${job.rows}`;
+  let cached=navTerrainEdgeCache.get(terrainKey);
+  if(!cached){cached=new Uint8Array(job.total*NAV_DIRECTIONS.length);navTerrainEdgeCache.set(terrainKey,cached);}
+  const slot=index*NAV_DIRECTIONS.length+direction;
+  if(cached[slot]===0){
+    const clear=segmentClearOfTerrain(x,y,nextX,nextY,job.radius);
+    cached[slot]=clear?2:1;
+    cached[next*NAV_DIRECTIONS.length+(NAV_DIRECTIONS.length-1-direction)]=cached[slot];
+  }
+  return cached[slot]===2&&segmentClearOfBuildings(x,y,nextX,nextY,job.radius);
+}
+function sharedFieldNodeIsClear(job,index,x,y){
+  if(job.walkable[index]===0){
+    job.walkable[index]=sharedTerrainNodeIsClear(job,index,x,y)&&positionClearOfBuildings(x,y,job.radius)?2:1;
+  }
+  return job.walkable[index]===2;
+}
+function sharedFieldTerrainMatches(job,x,y){
+  return job.requiredTerrain===null||job.requiredTerrain===undefined||
+    movementTerrain(tileAtWorld(x,y))===job.requiredTerrain;
+}
+function createSharedNavigationJob(goalX,goalY,radius,requiredTerrain,allowClosest){
   const step=Math.max(20,TILE/2),cols=Math.ceil(WORLD_W/step),rows=Math.ceil(WORLD_H/step),total=cols*rows;
-  const scratch=prepareNavSearch(total),stamp=scratch.stamp;
-  const {gScore,parent,seen,closed,walkableSeen,walkable,heapIndex,heapF}=scratch;
-  let heapSize=0,poppedF=0;
-  const heuristic=(x,y)=>Math.hypot(goalX-x,goalY-y);
-  const nodeIsClear=(index,x,y)=>{
-    if(walkableSeen[index]!==stamp){walkableSeen[index]=stamp;walkable[index]=positionClearForUnit(x,y,radius)?1:0;}
-    return walkable[index]===1;
+  const exactGoalClear=sharedFieldTerrainMatches({requiredTerrain},goalX,goalY)&&positionClearForUnit(goalX,goalY,radius);
+  const maxSeedDistance=exactGoalClear?Math.max(step*3,TILE*1.25):TILE*4;
+  const minGX=Math.max(0,Math.floor((goalX-maxSeedDistance)/step));
+  const maxGX=Math.min(cols-1,Math.floor((goalX+maxSeedDistance)/step));
+  const minGY=Math.max(0,Math.floor((goalY-maxSeedDistance)/step));
+  const maxGY=Math.min(rows-1,Math.floor((goalY+maxSeedDistance)/step));
+  return{
+    goalX,goalY,radius,requiredTerrain,allowClosest,step,cols,rows,total,
+    minGX,maxGX,minGY,maxGY,seedWidth:maxGX-minGX+1,seedHeight:maxGY-minGY+1,seedCursor:0,
+    exactGoalClear,exactSeeds:[],projectedSeeds:[],
+    targetMinX:Infinity,targetMaxX:-Infinity,targetMinY:Infinity,targetMaxY:-Infinity,
+    waitingTargets:new Set(),
+    cost:new Float64Array(total),next:new Int32Array(total),seen:new Uint8Array(total),
+    closed:new Uint8Array(total),walkable:new Uint8Array(total),seedProjected:new Uint8Array(total),
+    heapIndex:[],heapF:[],heapSize:0,poppedF:0,phase:"seed",done:false
   };
-  const push=(index,f)=>{
-    let i=heapSize++;
-    while(i>0){const p=(i-1)>>1;if(heapF[p]<=f)break;heapIndex[i]=heapIndex[p];heapF[i]=heapF[p];i=p;}
-    heapIndex[i]=index;heapF[i]=f;
-  };
-  const pop=()=>{
-    const root=heapIndex[0];poppedF=heapF[0];heapSize--;
-    if(heapSize>0){
-      const lastIndex=heapIndex[heapSize],lastF=heapF[heapSize];let i=0;
-      while(true){let c=i*2+1;if(c>=heapSize)break;if(c+1<heapSize&&heapF[c+1]<heapF[c])c++;if(lastF<=heapF[c])break;heapIndex[i]=heapIndex[c];heapF[i]=heapF[c];i=c;}
-      heapIndex[i]=lastIndex;heapF[i]=lastF;
+}
+function registerSharedNavigationTarget(job,x,y){
+  job.targetMinX=Math.min(job.targetMinX,x);job.targetMaxX=Math.max(job.targetMaxX,x);
+  job.targetMinY=Math.min(job.targetMinY,y);job.targetMaxY=Math.max(job.targetMaxY,y);
+}
+function sharedNavigationHeuristic(job,x,y){
+  if(!Number.isFinite(job.targetMinX))return 0;
+  const dx=x<job.targetMinX?job.targetMinX-x:x>job.targetMaxX?x-job.targetMaxX:0;
+  const dy=y<job.targetMinY?job.targetMinY-y:y>job.targetMaxY?y-job.targetMaxY:0;
+  return Math.hypot(dx,dy);
+}
+function finishSharedNavigationSeeds(job){
+  const hasExact=job.exactSeeds.length>0;
+  const seeds=job.exactSeeds.map(seed=>({...seed,projected:false}));
+  if(job.allowClosest){
+    const projectionPenalty=hasExact?job.total*job.step*4:0;
+    for(const seed of job.projectedSeeds)seeds.push({...seed,cost:seed.cost+projectionPenalty,projected:true});
+  }
+  job.exactSeeds=null;job.projectedSeeds=null;
+  if(!seeds.length){job.done=true;job.phase="done";return;}
+  for(const seed of seeds){
+    if(job.seen[seed.index]&&job.cost[seed.index]<=seed.cost)continue;
+    job.seen[seed.index]=1;job.cost[seed.index]=seed.cost;job.next[seed.index]=-2;
+    job.seedProjected[seed.index]=seed.projected?1:0;
+    const x=(seed.index%job.cols+.5)*job.step,y=(Math.floor(seed.index/job.cols)+.5)*job.step;
+    navJobPush(job,seed.index,seed.cost+sharedNavigationHeuristic(job,x,y));
+  }
+  job.phase="search";
+}
+function stepSharedNavigationJob(job,deadline){
+  while(!job.done&&performance.now()<deadline){
+    if(job.phase==="seed"){
+      const seedTotal=job.seedWidth*job.seedHeight;
+      if(job.seedCursor>=seedTotal){finishSharedNavigationSeeds(job);continue;}
+      const cursor=job.seedCursor++,gx=job.minGX+cursor%job.seedWidth,gy=job.minGY+Math.floor(cursor/job.seedWidth);
+      const index=gy*job.cols+gx,x=(gx+.5)*job.step,y=(gy+.5)*job.step;
+      if(!sharedFieldNodeIsClear(job,index,x,y)||!sharedFieldTerrainMatches(job,x,y))continue;
+      const distance=Math.hypot(job.goalX-x,job.goalY-y);
+      if(job.exactGoalClear&&segmentClearForUnit(x,y,job.goalX,job.goalY,job.radius)){
+        job.exactSeeds.push({index,cost:distance});
+      }
+      if(job.allowClosest){
+        job.projectedSeeds.push({index,cost:distance});
+      }
+      continue;
     }
-    return root;
-  };
-  const sx=Math.floor(startX/step),sy=Math.floor(startY/step);
-  const seedRadius=positionClearForUnit(startX,startY,radius)?radius:startRadius;
+    if(job.heapSize===0){job.done=true;job.phase="done";continue;}
+    const current=navJobPop(job);
+    if(job.closed[current])continue;
+    job.closed[current]=1;
+    const cx=current%job.cols,cy=Math.floor(current/job.cols),x=(cx+.5)*job.step,y=(cy+.5)*job.step;
+    for(let direction=0;direction<NAV_DIRECTIONS.length;direction++){
+      const [dx,dy]=NAV_DIRECTIONS[direction];
+      const nx=cx+dx,ny=cy+dy;if(nx<0||ny<0||nx>=job.cols||ny>=job.rows)continue;
+      const next=ny*job.cols+nx;if(job.closed[next])continue;
+      const nextX=(nx+.5)*job.step,nextY=(ny+.5)*job.step;
+      if(!sharedFieldNodeIsClear(job,next,nextX,nextY)||
+        !sharedTerrainEdgeIsClear(job,current,next,direction,x,y,nextX,nextY))continue;
+      const cost=job.cost[current]+Math.hypot(nextX-x,nextY-y);
+      if(!job.seen[next]||cost<job.cost[next]){
+        job.seen[next]=1;job.cost[next]=cost;job.next[next]=current;
+        navJobPush(job,next,cost+sharedNavigationHeuristic(job,nextX,nextY));
+      }
+    }
+  }
+}
+function extractSharedNavigationPath(job,startX,startY,startRadius,targetX,targetY,requiredTerrain){
+  const startGX=Math.floor(startX/job.step),startGY=Math.floor(startY/job.step);
+  const connectorRadius=positionClearForUnit(startX,startY,job.radius)?job.radius:startRadius;
+  const candidates=[];
   for(let oy=-3;oy<=3;oy++)for(let ox=-3;ox<=3;ox++){
-    const gx=sx+ox,gy=sy+oy;if(gx<0||gy<0||gx>=cols||gy>=rows)continue;
-    const index=gy*cols+gx,px=(gx+.5)*step,py=(gy+.5)*step;
-    if(!nodeIsClear(index,px,py)||!segmentClearForUnit(startX,startY,px,py,seedRadius))continue;
-    const cost=Math.hypot(px-startX,py-startY);
-    if(seen[index]!==stamp||cost<gScore[index]){seen[index]=stamp;gScore[index]=cost;parent[index]=-2;push(index,cost+heuristic(px,py));}
+    const gx=startGX+ox,gy=startGY+oy;if(gx<0||gy<0||gx>=job.cols||gy>=job.rows)continue;
+    const index=gy*job.cols+gx;if(!job.closed[index])continue;
+    const x=(gx+.5)*job.step,y=(gy+.5)*job.step;
+    const score=Math.hypot(x-startX,y-startY)+job.cost[index];
+    candidates.push({index,x,y,score});
   }
-  let bestGoal=-1,bestCost=Infinity,closestGoal=-1,closestDistance=Math.hypot(goalX-startX,goalY-startY),iterations=0;
-  while(heapSize&&iterations++<total*2){
-    const current=pop();
-    if(closed[current]===stamp)continue;
-    if(poppedF>=bestCost)break;
-    closed[current]=stamp;
-    const cx=current%cols,cy=Math.floor(current/cols),cpX=(cx+.5)*step,cpY=(cy+.5)*step;
-    const distanceToGoal=Math.hypot(goalX-cpX,goalY-cpY);
-    if(distanceToGoal<closestDistance){closestDistance=distanceToGoal;closestGoal=current;}
-    if(segmentClearForUnit(cpX,cpY,goalX,goalY,radius)){
-      const cost=gScore[current]+Math.hypot(goalX-cpX,goalY-cpY);
-      if(cost<bestCost){bestCost=cost;bestGoal=current;}
-    }
-    for(const [dx,dy] of NAV_DIRECTIONS){
-      const nx=cx+dx,ny=cy+dy;if(nx<0||ny<0||nx>=cols||ny>=rows)continue;
-      const next=ny*cols+nx;if(closed[next]===stamp)continue;
-      const npX=(nx+.5)*step,npY=(ny+.5)*step;
-      if(!nodeIsClear(next,npX,npY)||!segmentClearForUnit(cpX,cpY,npX,npY,radius))continue;
-      let fromX=cpX,fromY=cpY,fromCost=gScore[current],newParent=current;
-      const pp=parent[current];
-      if(pp===-2&&segmentClearForUnit(startX,startY,npX,npY,radius)){
-        fromX=startX;fromY=startY;fromCost=0;newParent=-2;
-      }else if(pp>=0){
-        const ax=(pp%cols+.5)*step,ay=(Math.floor(pp/cols)+.5)*step;
-        if(segmentClearForUnit(ax,ay,npX,npY,radius)){
-          fromX=ax;fromY=ay;fromCost=gScore[pp];newParent=pp;
-        }
-      }
-      const tentative=fromCost+Math.hypot(npX-fromX,npY-fromY);
-      if(seen[next]!==stamp||tentative<gScore[next]){
-        seen[next]=stamp;gScore[next]=tentative;parent[next]=newParent;push(next,tentative+heuristic(npX,npY));
-      }
-    }
+  candidates.sort((a,b)=>a.score-b.score);
+  let best=-1;
+  for(let i=0;i<Math.min(8,candidates.length);i++){
+    const candidate=candidates[i];
+    if(segmentClearForUnit(startX,startY,candidate.x,candidate.y,connectorRadius)){best=candidate.index;break;}
   }
-  let projected=false;
-  if(bestGoal<0){
-    if(!allowClosest||closestGoal<0||closestDistance>=Math.hypot(goalX-startX,goalY-startY)-step*.25)return null;
-    bestGoal=closestGoal;projected=true;
+  if(best<0)return job.done?null:undefined;
+  const raw=[{x:startX,y:startY}];
+  let current=best,terminal=best,guard=0;
+  while(current>=0&&guard++<=job.total){
+    terminal=current;
+    raw.push({x:(current%job.cols+.5)*job.step,y:(Math.floor(current/job.cols)+.5)*job.step});
+    current=job.next[current];
   }
-  const reversed=projected?[]:[{x:goalX,y:goalY}];
-  for(let current=bestGoal;current>=0;current=parent[current]){
-    reversed.push({x:(current%cols+.5)*step,y:(Math.floor(current/cols)+.5)*step});
+  let projected=job.seedProjected[terminal]===1;
+  if(!projected){
+    const last=raw[raw.length-1];
+    if(Math.hypot(last.x-job.goalX,last.y-job.goalY)>1)raw.push({x:job.goalX,y:job.goalY});
   }
-  const raw=reversed.reverse(),points=[{x:startX,y:startY},...raw],smooth=[];
-  for(let i=0;i<points.length-1;){
-    let next=points.length-1;
-    while(next>i+1&&!segmentClearForUnit(points[i].x,points[i].y,points[next].x,points[next].y,radius))next--;
-    smooth.push(points[next]);i=next;
+  const last=raw[raw.length-1];
+  const targetTerrainMatches=requiredTerrain===null||requiredTerrain===undefined||
+    movementTerrain(tileAtWorld(targetX,targetY))===requiredTerrain;
+  if(targetTerrainMatches&&positionClearForUnit(targetX,targetY,job.radius)&&
+    segmentClearForUnit(last.x,last.y,targetX,targetY,job.radius)){
+    if(Math.hypot(last.x-targetX,last.y-targetY)>1)raw.push({x:targetX,y:targetY});
+    projected=false;
+  }else if(Math.hypot(last.x-targetX,last.y-targetY)>2)projected=true;
+  const smooth=[];
+  for(let i=0;i<raw.length-1;){
+    let next=raw.length-1;
+    while(next>i+1&&!segmentClearForUnit(raw[i].x,raw[i].y,raw[next].x,raw[next].y,job.radius))next--;
+    smooth.push(raw[next]);i=next;
   }
   if(projected)smooth.projectedGoal=true;
   return smooth;
 }
+function requestSharedSmoothPath(startX,startY,goalX,goalY,radius,startRadius=radius,requiredTerrain=null,allowClosest=true){
+  const now=navFrameNow||performance.now();
+  const key=sharedNavigationKey(goalX,goalY,radius,requiredTerrain,allowClosest);
+  let entry=navSharedFieldCache.get(key);
+  const directKey=`${Math.round(startX/16)},${Math.round(startY/16)}>${Math.round(goalX)},${Math.round(goalY)}`;
+  if(entry){
+    let direct=entry.directCache.get(directKey);
+    if(direct===undefined){
+      direct=positionClearForUnit(goalX,goalY,radius)&&segmentClearForUnit(startX,startY,goalX,goalY,radius);
+      entry.directCache.set(directKey,direct);
+    }
+    if(direct)return[{x:goalX,y:goalY}];
+  }else if(positionClearForUnit(goalX,goalY,radius)&&segmentClearForUnit(startX,startY,goalX,goalY,radius)){
+    return[{x:goalX,y:goalY}];
+  }
+  if(!entry){
+    entry={
+      key,kind:"field",status:"pending",lastRequestedFrame:navFrameSerial,lastUsedTime:now,
+      job:createSharedNavigationJob(goalX,goalY,radius,requiredTerrain,allowClosest),
+      directCache:new Map([[directKey,false]])
+    };
+    navSharedFieldCache.set(key,entry);navPendingJobs.unshift(entry);trimSharedNavigationCache();
+  }
+  entry.lastRequestedFrame=navFrameSerial;entry.lastUsedTime=now;
+  registerSharedNavigationTarget(entry.job,startX,startY);
+  const targetKey=`${Math.round(startX/16)},${Math.round(startY/16)}`;
+  const path=extractSharedNavigationPath(entry.job,startX,startY,startRadius,goalX,goalY,requiredTerrain);
+  if(path===undefined&&!entry.job.done){
+    entry.job.waitingTargets.add(targetKey);
+    if(entry.status!=="pending"){
+      entry.status="pending";
+      if(!navPendingJobs.includes(entry))navPendingJobs.unshift(entry);
+    }
+  }else{
+    entry.job.waitingTargets.delete(targetKey);
+    if(entry.status==="pending"&&!entry.job.done&&entry.job.waitingTargets.size===0)entry.status="ready";
+  }
+  return path;
+}
+function createSmoothPathJob(startX,startY,goalX,goalY,radius,startRadius=radius,allowClosest=false){
+  const step=Math.max(20,TILE/2),cols=Math.ceil(WORLD_W/step),rows=Math.ceil(WORLD_H/step),total=cols*rows;
+  return{
+    startX,startY,goalX,goalY,radius,startRadius,allowClosest,step,cols,rows,total,
+    sx:Math.floor(startX/step),sy:Math.floor(startY/step),seedRadius:positionClearForUnit(startX,startY,radius)?radius:startRadius,
+    phase:"seed",seedCursor:0,gScore:new Float64Array(total),parent:new Int32Array(total),
+    seen:new Uint8Array(total),closed:new Uint8Array(total),walkable:new Uint8Array(total),
+    heapIndex:[],heapF:[],heapSize:0,poppedF:0,bestGoal:-1,bestCost:Infinity,
+    closestGoal:-1,closestDistance:Math.hypot(goalX-startX,goalY-startY),iterations:0,done:false,path:undefined
+  };
+}
+function navJobNodeIsClear(job,index,x,y){
+  if(job.walkable[index]===0)job.walkable[index]=positionClearForUnit(x,y,job.radius)?2:1;
+  return job.walkable[index]===2;
+}
+function navJobPush(job,index,f){
+  let i=job.heapSize++;
+  while(i>0){const p=(i-1)>>1;if(job.heapF[p]<=f)break;job.heapIndex[i]=job.heapIndex[p];job.heapF[i]=job.heapF[p];i=p;}
+  job.heapIndex[i]=index;job.heapF[i]=f;
+}
+function navJobPop(job){
+  const root=job.heapIndex[0];job.poppedF=job.heapF[0];job.heapSize--;
+  if(job.heapSize>0){
+    const lastIndex=job.heapIndex[job.heapSize],lastF=job.heapF[job.heapSize];let i=0;
+    while(true){let c=i*2+1;if(c>=job.heapSize)break;if(c+1<job.heapSize&&job.heapF[c+1]<job.heapF[c])c++;if(lastF<=job.heapF[c])break;job.heapIndex[i]=job.heapIndex[c];job.heapF[i]=job.heapF[c];i=c;}
+    job.heapIndex[i]=lastIndex;job.heapF[i]=lastF;
+  }
+  return root;
+}
+function finishSmoothPathJob(job){
+  let projected=false,bestGoal=job.bestGoal;
+  if(bestGoal<0){
+    if(!job.allowClosest||job.closestGoal<0||job.closestDistance>=Math.hypot(job.goalX-job.startX,job.goalY-job.startY)-job.step*.25){
+      job.path=null;job.done=true;return;
+    }
+    bestGoal=job.closestGoal;projected=true;
+  }
+  const reversed=projected?[]:[{x:job.goalX,y:job.goalY}];
+  for(let current=bestGoal;current>=0;current=job.parent[current]){
+    reversed.push({x:(current%job.cols+.5)*job.step,y:(Math.floor(current/job.cols)+.5)*job.step});
+  }
+  const raw=reversed.reverse(),points=[{x:job.startX,y:job.startY},...raw],smooth=[];
+  for(let i=0;i<points.length-1;){
+    let next=points.length-1;
+    while(next>i+1&&!segmentClearForUnit(points[i].x,points[i].y,points[next].x,points[next].y,job.radius))next--;
+    smooth.push(points[next]);i=next;
+  }
+  if(projected)smooth.projectedGoal=true;
+  job.path=smooth;job.done=true;
+}
+function stepSmoothPathJob(job,deadline){
+  while(!job.done&&performance.now()<deadline){
+    if(job.phase==="seed"){
+      if(job.seedCursor>=49){job.phase="search";continue;}
+      const cursor=job.seedCursor++,ox=cursor%7-3,oy=Math.floor(cursor/7)-3;
+      const gx=job.sx+ox,gy=job.sy+oy;if(gx<0||gy<0||gx>=job.cols||gy>=job.rows)continue;
+      const index=gy*job.cols+gx,px=(gx+.5)*job.step,py=(gy+.5)*job.step;
+      if(!navJobNodeIsClear(job,index,px,py)||!segmentClearForUnit(job.startX,job.startY,px,py,job.seedRadius))continue;
+      const cost=Math.hypot(px-job.startX,py-job.startY);
+      if(!job.seen[index]||cost<job.gScore[index]){
+        job.seen[index]=1;job.gScore[index]=cost;job.parent[index]=-2;
+        navJobPush(job,index,cost+Math.hypot(job.goalX-px,job.goalY-py));
+      }
+      continue;
+    }
+    if(job.heapSize===0||job.iterations>=job.total*2){finishSmoothPathJob(job);continue;}
+    job.iterations++;
+    const current=navJobPop(job);
+    if(job.closed[current])continue;
+    if(job.poppedF>=job.bestCost){finishSmoothPathJob(job);continue;}
+    job.closed[current]=1;
+    const cx=current%job.cols,cy=Math.floor(current/job.cols),cpX=(cx+.5)*job.step,cpY=(cy+.5)*job.step;
+    const distanceToGoal=Math.hypot(job.goalX-cpX,job.goalY-cpY);
+    if(distanceToGoal<job.closestDistance){job.closestDistance=distanceToGoal;job.closestGoal=current;}
+    if(segmentClearForUnit(cpX,cpY,job.goalX,job.goalY,job.radius)){
+      const cost=job.gScore[current]+distanceToGoal;
+      if(cost<job.bestCost){job.bestCost=cost;job.bestGoal=current;}
+    }
+    for(const [dx,dy] of NAV_DIRECTIONS){
+      const nx=cx+dx,ny=cy+dy;if(nx<0||ny<0||nx>=job.cols||ny>=job.rows)continue;
+      const next=ny*job.cols+nx;if(job.closed[next])continue;
+      const npX=(nx+.5)*job.step,npY=(ny+.5)*job.step;
+      if(!navJobNodeIsClear(job,next,npX,npY)||!segmentClearForUnit(cpX,cpY,npX,npY,job.radius))continue;
+      let fromX=cpX,fromY=cpY,fromCost=job.gScore[current],newParent=current;
+      const pp=job.parent[current];
+      if(pp===-2&&segmentClearForUnit(job.startX,job.startY,npX,npY,job.radius)){
+        fromX=job.startX;fromY=job.startY;fromCost=0;newParent=-2;
+      }else if(pp>=0){
+        const ax=(pp%job.cols+.5)*job.step,ay=(Math.floor(pp/job.cols)+.5)*job.step;
+        if(segmentClearForUnit(ax,ay,npX,npY,job.radius)){
+          fromX=ax;fromY=ay;fromCost=job.gScore[pp];newParent=pp;
+        }
+      }
+      const tentative=fromCost+Math.hypot(npX-fromX,npY-fromY);
+      if(!job.seen[next]||tentative<job.gScore[next]){
+        job.seen[next]=1;job.gScore[next]=tentative;job.parent[next]=newParent;
+        navJobPush(job,next,tentative+Math.hypot(job.goalX-npX,job.goalY-npY));
+      }
+    }
+  }
+}
+function processNavigationJobs(){
+  const frameStarted=performance.now(),frameDeadline=frameStarted+NAV_PLAN_TIME_BUDGET_MS;
+  let slices=0;
+  while(navPendingJobs.length&&slices<NAV_PLAN_COUNT_BUDGET&&performance.now()<frameDeadline){
+    const entry=navPendingJobs.shift();
+    const sliceStarted=performance.now();
+    if(entry.kind==="field"){
+      if(entry.status!=="pending"||navSharedFieldCache.get(entry.key)!==entry)continue;
+      if(entry.lastRequestedFrame!==navFrameSerial){navSharedFieldCache.delete(entry.key);continue;}
+      stepSharedNavigationJob(entry.job,Math.min(frameDeadline,sliceStarted+NAV_JOB_SLICE_MS));
+      navPlansThisFrame++;slices++;
+      if(entry.job.done)entry.status="done";
+      else if(entry.job.waitingTargets.size)navPendingJobs.push(entry);
+      else entry.status="ready";
+      continue;
+    }
+    if(entry.status!=="pending"||navPathCache.get(entry.key)!==entry)continue;
+    if(entry.lastRequestedFrame!==navFrameSerial){navPathCache.delete(entry.key);continue;}
+    if(!entry.job){const p=entry.params;entry.job=createSmoothPathJob(p.startX,p.startY,p.goalX,p.goalY,p.radius,p.startRadius,p.allowClosest);}
+    stepSmoothPathJob(entry.job,Math.min(frameDeadline,sliceStarted+NAV_JOB_SLICE_MS));
+    navPlansThisFrame++;slices++;
+    if(entry.job.done){
+      const p=entry.params;entry.status="done";entry.time=navFrameNow;entry.path=entry.job.path;
+      entry.startX=p.startX;entry.startY=p.startY;
+      entry.shareFailure=!!entry.path||positionClearForUnit(p.startX,p.startY,p.startRadius);
+      entry.job=null;entry.params=null;
+    }else navPendingJobs.push(entry);
+  }
+  navPlanTimeThisFrame=performance.now()-frameStarted;
+  trimNavigationCache();
+}
+function findSmoothPath(startX,startY,goalX,goalY,radius,startRadius=radius,allowClosest=false){
+  if(segmentClearForUnit(startX,startY,goalX,goalY,radius))return[{x:goalX,y:goalY}];
+  const job=createSmoothPathJob(startX,startY,goalX,goalY,radius,startRadius,allowClosest);
+  while(!job.done)stepSmoothPathJob(job,Infinity);
+  return job.path;
+}
 function invalidateNavPath(u){
   u.navPath=[];u.navPathIndex=0;u.navPathKey="";u.navPathFailedKey="";u.navPathRetry=0;u.navPathRadius=u.radius;
-  u.navGoalX=u.x;u.navGoalY=u.y;u.navGoalProjected=false;
+  u.navGoalX=u.x;u.navGoalY=u.y;u.navGoalProjected=false;u.navWaiting=false;
+}
+function sharedNavigationRadius(radius){
+  if(radius<=17)return 17;
+  if(radius<=25)return 25;
+  if(radius<=32)return 32;
+  return Math.ceil(radius/4)*4;
 }
 function movementTerrainRequirementSatisfied(u,requiredTerrain){
   if(requiredTerrain===null||requiredTerrain===undefined||UNIT_TYPES[u.type].layer==="air")return true;
@@ -1252,28 +1617,34 @@ function moveUnitAlongPath(u,tx,ty,arrivalRadius,dt,key="move",requiredTerrain=n
     moveToward(u,tx,ty,dt);
     return Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius;
   }
-  if(!recoverStuckUnit(u,tx,ty))return false;
+  if(!recoverStuckUnit(u))return false;
   if(Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius&&movementTerrainRequirementSatisfied(u,requiredTerrain))return true;
   const pathKey=`${key}:${Math.round(tx/16)},${Math.round(ty/16)}:${Math.round(arrivalRadius)}`;
   if(u.navPathKey!==pathKey){
     u.navPathRetry=Math.max(0,(u.navPathRetry||0)-dt);
     if(u.navPathFailedKey===pathKey&&u.navPathRetry>0)return false;
-    let pathRadius=u.radius+NAV_CLEARANCE;
-    let approach=chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
-    let path=approach&&requestSmoothPath(u.x,u.y,approach.x,approach.y,pathRadius,u.radius);
-    if(path===undefined)return false;
+    const useSharedField=key==="move"||key==="attackMove";
+    let pathRadius=useSharedField?sharedNavigationRadius(u.radius+NAV_CLEARANCE):u.radius+NAV_CLEARANCE;
+    let approach=useSharedField?{x:tx,y:ty}:chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
+    let path=useSharedField?
+      requestSharedSmoothPath(u.x,u.y,tx,ty,pathRadius,u.radius,requiredTerrain,allowNearestReachable):
+      approach&&requestSmoothPath(u.x,u.y,approach.x,approach.y,pathRadius,u.radius);
+    if(path===undefined){u.navWaiting=true;return false;}
     if(!path){
-      pathRadius=u.radius+MIN_NAV_CLEARANCE;
-      approach=chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
-      path=approach&&requestSmoothPath(u.x,u.y,approach.x,approach.y,pathRadius,u.radius,allowNearestReachable);
-      if(path===undefined)return false;
+      pathRadius=useSharedField?sharedNavigationRadius(u.radius+MIN_NAV_CLEARANCE):u.radius+MIN_NAV_CLEARANCE;
+      approach=useSharedField?{x:tx,y:ty}:chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
+      path=useSharedField?
+        requestSharedSmoothPath(u.x,u.y,tx,ty,pathRadius,u.radius,requiredTerrain,allowNearestReachable):
+        approach&&requestSmoothPath(u.x,u.y,approach.x,approach.y,pathRadius,u.radius,allowNearestReachable);
+      if(path===undefined){u.navWaiting=true;return false;}
     }
     if(!path){
+      u.navWaiting=false;
       u.navPath=[];u.navPathIndex=0;u.navPathKey="";
       u.navPathFailedKey=pathKey;u.navPathRetry=.35;
       return false;
     }
-    u.navPathKey=pathKey;u.navPath=path;u.navPathIndex=0;u.navPathFailedKey="";u.navPathRetry=0;u.navPathRadius=pathRadius;
+    u.navWaiting=false;u.navPathKey=pathKey;u.navPath=path;u.navPathIndex=0;u.navPathFailedKey="";u.navPathRetry=0;u.navPathRadius=pathRadius;
     const pathGoal=path.projectedGoal?path[path.length-1]:approach;
     u.navGoalX=pathGoal.x;u.navGoalY=pathGoal.y;
     u.navGoalProjected=!!path.projectedGoal||Math.hypot(approach.x-tx,approach.y-ty)>arrivalRadius;
@@ -1541,6 +1912,7 @@ function resetMovementOrderProgress(u,o){
   o.progressX=u.x;o.progressY=u.y;o.progressElapsed=0;o.stalledTime=0;
 }
 function movementOrderStalled(u,o,dt){
+  if(u.navWaiting){resetMovementOrderProgress(u,o);return false;}
   if(!Number.isFinite(o.progressX)||!Number.isFinite(o.progressY)){
     resetMovementOrderProgress(u,o);o.progressElapsed=dt;return false;
   }
@@ -1556,11 +1928,44 @@ function clearMovementRecovery(u,o){
   delete o.recoveryX;delete o.recoveryY;o.recoveryElapsed=0;
   invalidateNavPath(u);resetMovementOrderProgress(u,o);
 }
+function movementBoundaryEscapeDirection(u){
+  const rayCount=16,probeStep=Math.max(8,Math.min(12,u.radius*.65)),maxProbe=Math.max(72,TILE*1.25);
+  const rays=[];let escapeX=0,escapeY=0;
+  for(let i=0;i<rayCount;i++){
+    const angle=i/rayCount*Math.PI*2,dx=Math.cos(angle),dy=Math.sin(angle);
+    let clearance=0,ox=u.x,oy=u.y;
+    for(let distance=probeStep;distance<=maxProbe+.01;distance+=probeStep){
+      const x=u.x+dx*distance,y=u.y+dy*distance;
+      if(!canStep(ox,oy,x,y,u.radius))break;
+      clearance=distance;ox=x;oy=y;
+    }
+    rays.push({dx,dy,clearance});
+    if(clearance<maxProbe-probeStep*.5){
+      const proximity=1-clearance/maxProbe,weight=proximity*proximity;
+      escapeX-=dx*weight;escapeY-=dy*weight;
+    }
+  }
+  let magnitude=Math.hypot(escapeX,escapeY);
+  if(magnitude>.08)return{x:escapeX/magnitude,y:escapeY/magnitude,fromBoundary:true};
+  for(const v of units){
+    if(v===u||v.hp<=0||v.team!==u.team||unitLayer(v)!==unitLayer(u))continue;
+    const dx=u.x-v.x,dy=u.y-v.y,distance=Math.hypot(dx,dy);
+    if(distance<=0||distance>=maxProbe)continue;
+    const weight=(maxProbe-distance)/maxProbe;
+    escapeX+=dx/distance*weight;escapeY+=dy/distance*weight;
+  }
+  magnitude=Math.hypot(escapeX,escapeY);
+  if(magnitude>.08)return{x:escapeX/magnitude,y:escapeY/magnitude,fromBoundary:false};
+  const preferred=(u.id*7)%rayCount;
+  rays.sort((a,b)=>b.clearance-a.clearance||
+    Math.abs(Math.atan2(a.dy,a.dx)-preferred/rayCount*Math.PI*2)-
+    Math.abs(Math.atan2(b.dy,b.dx)-preferred/rayCount*Math.PI*2));
+  return{x:rays[0].dx,y:rays[0].dy,fromBoundary:false};
+}
 function beginMovementRecovery(u,o){
-  recoverStuckUnit(u,o.x,o.y);
+  recoverStuckUnit(u);
   invalidateNavPath(u);resetMovementOrderProgress(u,o);
-  const goalDx=o.x-u.x,goalDy=o.y-u.y,goalDistance=Math.hypot(goalDx,goalDy)||1;
-  const awayX=-goalDx/goalDistance,awayY=-goalDy/goalDistance;
+  const escape=movementBoundaryEscapeDirection(u),awayX=escape.x,awayY=escape.y;
   const base=Math.atan2(awayY,awayX);
   const offsets=[0,Math.PI/12,-Math.PI/12,Math.PI/6,-Math.PI/6,Math.PI/3,-Math.PI/3,Math.PI/2,-Math.PI/2];
   let best=null,bestScore=Infinity;
@@ -1576,7 +1981,7 @@ function beginMovementRecovery(u,o){
         crowdPenalty+=Math.max(0,u.radius+v.radius+12-Math.hypot(x-v.x,y-v.y))*10;
       }
       const lineDeviation=Math.abs((x-u.x)*awayY-(y-u.y)*awayX);
-      const score=lineDeviation*8+crowdPenalty+distance*.1;
+      const score=lineDeviation*8+crowdPenalty+distance*.1-awayProgress*4;
       if(score<bestScore){best={x,y};bestScore=score;}
     }
   }
@@ -1703,8 +2108,13 @@ function queueUnit(building,type,team){
   const produces=BUILDING_TYPES[building?.type]?.produces||[];
   if(!s||!building||building.hp<=0||!building.complete||!produces.includes(type)) return false;
   if(currentPop(team)+queuedPop(team)>=POP_CAP) return false;
-  if(teamResources[team]<s.cost) return false;
-  teamResources[team]-=s.cost;
+  if(!hasResources(team,s.cost)) return false;
+  spendResources(team,s.cost);
+  if(instantBuildFor(team)){
+    if(spawnNearBuilding(building,type))return true;
+    building.queue.push({type,time:0,max:s.build});
+    return true;
+  }
   building.queue.push({type,time:s.build,max:s.build});
   return true;
 }
@@ -1758,7 +2168,9 @@ function spawnNearBuilding(building,type){
 function updateBuildings(dt){
   for(const building of buildings){
     if(!building.complete||building.hp<=0||!building.queue.length) continue;
-    const q=building.queue[0];q.time-=dt;
+    const q=building.queue[0];
+    if(instantBuildFor(building.team))q.time=0;
+    else q.time-=dt;
     if(q.time<=0){
       q.time=0;
       if(spawnNearBuilding(building,q.type))building.queue.shift();
@@ -1777,7 +2189,7 @@ function checkGameOver(){
   if(hqByTeam[1]&&hqByTeam[1].hp<=0){gameOver=true;winnerTeam=0;}
 }
 
-/* 간단 싱글 테스트 AI */
+/* 간단 연습모드 AI */
 let aiBuildTimer=0,aiWaveTimer=0;
 function findAIBuildSite(team,type){
   const hq=hqByTeam[team],dir=team===TEAM_LEFT?1:-1;
@@ -2276,7 +2688,7 @@ function handleBottomUI(mx,my){
     for(let i=0;i<buildButtons.length;i++){
       const x=bx+i*(bw+gap),type=buildButtons[i];
       if(mx>=x&&mx<=x+bw&&my>=by&&my<=by+bh){
-        if((teamResources[localTeam]||0)>=BUILDING_TYPES[type].cost){
+        if(hasResources(localTeam,BUILDING_TYPES[type].cost)){
           buildPlacementMode=type;attackMoveMode=false;
         }
         return true;
@@ -2302,7 +2714,8 @@ function drawHUD(){
   ctx.fillStyle="rgba(8,12,15,.78)";ctx.fillRect(innerWidth/2-160,12,320,60);
   ctx.strokeStyle="rgba(255,255,255,.14)";ctx.strokeRect(innerWidth/2-159.5,12.5,319,59);
   ctx.fillStyle="#dff6ff";ctx.font="bold 18px sans-serif";ctx.textAlign="center";
-  ctx.fillText(`자원 ${Math.floor(teamResources[localTeam]||0)}   ·   인구 ${currentPop(localTeam)} / ${POP_CAP}`,innerWidth/2,35);
+  const resourceText=practiceModeFor(localTeam)&&practiceInfiniteResources?"∞":Math.floor(teamResources[localTeam]||0);
+  ctx.fillText(`자원 ${resourceText}   ·   인구 ${currentPop(localTeam)} / ${POP_CAP}`,innerWidth/2,35);
   ctx.font="12px sans-serif";ctx.fillStyle=(attackMoveMode||buildPlacementMode)?"#f4d35e":"#becad4";
   const modeText=buildPlacementMode?`${BUILDING_TYPES[buildPlacementMode].name} 배치 지점을 좌클릭 · 우클릭/Esc 취소`:
     attackMoveMode?"공격할 적 또는 이동 지점을 좌클릭 · Esc 취소":"사령부가 파괴되면 패배";
@@ -2331,7 +2744,7 @@ function drawHUD(){
       const types=BUILDING_TYPES[selectedBuilding.type]?.produces||[];
       types.forEach((type,i)=>{
         const s=UNIT_TYPES[type],x=bx+i*(bw+gap);
-        const can=(teamResources[localTeam]||0)>=s.cost&&currentPop(localTeam)+queuedPop(localTeam)<POP_CAP;
+        const can=hasResources(localTeam,s.cost)&&currentPop(localTeam)+queuedPop(localTeam)<POP_CAP;
         ctx.fillStyle=can?"#273b49":"#25292c";ctx.fillRect(x,by,bw,bh);
         ctx.strokeStyle="rgba(255,255,255,.15)";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
         ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(s.name,x+bw/2,by+16);
@@ -2339,7 +2752,7 @@ function drawHUD(){
       });
     }else if(selectedWorkers.length){
       buildButtons.forEach((type,i)=>{
-        const s=BUILDING_TYPES[type],x=bx+i*(bw+gap),can=(teamResources[localTeam]||0)>=s.cost;
+        const s=BUILDING_TYPES[type],x=bx+i*(bw+gap),can=hasResources(localTeam,s.cost);
         ctx.fillStyle=can?"#314334":"#25292c";ctx.fillRect(x,by,bw,bh);
         ctx.strokeStyle="rgba(255,255,255,.15)";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
         ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(s.name,x+bw/2,by+16);
@@ -2412,6 +2825,7 @@ function loop(now){
     const nowSec=now/1000;
     beginNavigationFrame(now);
     updateUnits(dt,nowSec);
+    processNavigationJobs();
     updateBuildings(dt);
     updateProjectiles(dt);
     updateSoloAI(dt);

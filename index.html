@@ -186,7 +186,6 @@ const TEAM_LEFT=0,TEAM_RIGHT=1,TEAM_NEUTRAL=-1;
 const POP_CAP = 50;
 const RESOURCE_AMOUNT=750;
 const MAX_MINERS_PER_NODE=5;
-const COUNTER_MULT = 1.85;
 const HILL_DAMAGE_MULT = 0.70;
 const MAP_STORAGE_KEY="miniLinkRTS.customMaps.v3";
 let terrain=[];
@@ -308,36 +307,51 @@ applyMapData(defaultMap);
 const UNIT_TYPES = {
   worker: {
     name:"일꾼", hp:65, speed:88, range:52, damage:3, reload:1.0,
-    vision:320, cost:20, build:3.5, radius:12,
-    special:"정비: 명령이 없을 때 가까운 아군 장갑차/사령부를 자동 수리"
+    vision:320, cost:20, build:3.5, radius:12, armor:"human", layer:"ground", targets:["ground"],
+    special:"정비: 명령이 없을 때 가까운 아군 중장갑/건물을 자동 수리"
   },
   infantry: {
-    name:"보병", hp:125, speed:86, range:125, damage:11.5, reload:0.60,
-    vision:320, cost:35, build:4.5, radius:13,
-    special:"제압사격: 4번째 공격이 50% 추가 피해"
+    name:"보병", hp:125, speed:86, range:135, damage:12, reload:0.65,
+    vision:330, cost:35, build:4.5, radius:13, armor:"human", layer:"ground", targets:["ground","air"],
+    special:"범용 보병: 지상과 공중을 모두 공격"
+  },
+  medic: {
+    name:"메딕", hp:90, speed:82, range:90, damage:2, reload:1.15,
+    vision:340, cost:45, build:5.5, radius:12, armor:"human", layer:"ground", targets:["ground"],healRate:18,healRange:72,
+    special:"의무병: 아군 인간 유닛을 우클릭해 단일 회복"
   },
   sniper: {
-    name:"저격수", hp:70, speed:72, range:270, damage:36, reload:1.80,
-    vision:480, cost:50, build:7.0, radius:12,
-    special:"정밀사격: 사거리/시야 1.5배, 3초간 발사하지 않으면 다음 탄 35% 추가 피해"
+    name:"스나이퍼", hp:68, speed:54, range:285, damage:34, reload:2.35,
+    vision:500, cost:55, build:7.0, radius:12, armor:"human", layer:"ground", targets:["ground"],
+    special:"대인 특화: 인간에게 강력하지만 중장갑 피해 크게 감소"
   },
-  armored: {
-    name:"장갑차", hp:260, speed:62, range:160, damage:24, reload:1.15,
-    vision:320, cost:60, build:9.0, radius:18,
-    special:"고폭탄: 명중 지점 주변 55 범위에 45% 스플래시 피해"
+  antitank: {
+    name:"대전차병", hp:105, speed:58, range:190, damage:19, reload:1.95,
+    vision:350, cost:55, build:7.5, radius:13, armor:"human", layer:"ground", targets:["ground"],
+    special:"대전차 화기: 중장갑에 강하지만 이동·공격 속도가 느림"
   },
-  assault: {
-    name:"돌격병", hp:140, speed:108, range:76, damage:13, reload:0.55,
-    vision:320, cost:40, build:5.0, radius:14,
-    special:"근접돌격: 55 거리 이내에서는 공격속도 20% 증가"
+  antiair: {
+    name:"대공병", hp:105, speed:72, range:220, damage:7, reload:1.0,
+    vision:410, cost:50, build:6.5, radius:13, armor:"human", layer:"ground", targets:["ground","air"],
+    special:"대공 특화: 공중에 강력하지만 지상 공격은 매우 약함"
+  },
+  heavyTank: {
+    name:"중장갑탱크", hp:420, speed:48, range:175, damage:31, reload:1.45,
+    vision:340, cost:110, build:12, radius:20, armor:"heavy", layer:"ground", targets:["ground"],
+    special:"중장갑: 지상 스플래시 공격, 공중 공격 불가"
+  },
+  lightAircraft: {
+    name:"경비행기", hp:150, speed:145, range:145, damage:8, reload:.7,
+    vision:430, cost:85, build:10, radius:16, armor:"air", layer:"air", targets:["ground","air"],
+    special:"공중 유닛: 모든 지형을 통과하지만 공격력은 낮음"
   }
 };
 
-const advantage = {
-  infantry:"assault",
-  assault:"armored",
-  armored:"sniper",
-  sniper:"infantry"
+const BUILDING_TYPES = {
+  hq:{name:"사령부",hp:1200,radius:42,vision:320,cost:0,build:0,produces:["worker"]},
+  barracks:{name:"병영",hp:650,radius:36,vision:270,cost:120,build:7,produces:["infantry","medic","sniper","antitank","antiair"]},
+  factory:{name:"군수공장",hp:900,radius:42,vision:280,cost:180,build:10,produces:["heavyTank"]},
+  airport:{name:"공항",hp:720,radius:40,vision:300,cost:160,build:9,produces:["lightAircraft"]}
 };
 
 let nextId=1;
@@ -360,13 +374,16 @@ function makeUnit(type,team,x,y){
   };
   units.push(u); return u;
 }
-function makeHQ(team,x,y){
+function makeBuilding(type,team,x,y,complete=true){
+  const s=BUILDING_TYPES[type];
   const b={
-    id:nextId++,kind:"building",type:"hq",name:"사령부",team,x,y,renderX:x,renderY:y,
-    hp:1200,maxHp:1200,radius:42,vision:320,queue:[]
+    id:nextId++,kind:"building",type,name:s.name,team,x,y,renderX:x,renderY:y,
+    hp:complete?s.hp:1,maxHp:s.hp,radius:s.radius,vision:s.vision,queue:[],complete,
+    buildTime:s.build,buildRemaining:complete?0:s.build
   };
   buildings.push(b); return b;
 }
+function makeHQ(team,x,y){ return makeBuilding("hq",team,x,y,true); }
 function makeResource(team,x,y){
   const r={id:nextId++,kind:"resource",team,x,y,radius:26,amount:RESOURCE_AMOUNT,maxAmount:RESOURCE_AMOUNT};
   resourceNodes.push(r); return r;
@@ -668,7 +685,8 @@ function exportState(){
       carry:u.carry,gatherPhase:u.gatherPhase
     })),
     buildings:buildings.filter(b=>b.hp>0).map(b=>{
-      const data={id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision};
+      const data={id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision,
+        complete:b.complete,buildTime:b.buildTime,buildRemaining:b.buildRemaining};
       if(entityVisibleTo(TEAM_RIGHT,b)){
         data.hp=b.hp;
         data.maxHp=b.maxHp;
@@ -768,6 +786,22 @@ function unitsForIds(team,ids){
   const set=new Set(ids||[]);
   return units.filter(u=>u.hp>0&&u.team===team&&set.has(u.id));
 }
+function unitArmor(e){
+  if(e.kind==="building") return "heavy";
+  return UNIT_TYPES[e.type]?.armor||"human";
+}
+function unitLayer(e){
+  if(e.kind==="building") return "ground";
+  return UNIT_TYPES[e.type]?.layer||"ground";
+}
+function canPlaceBuilding(type,x,y){
+  const s=BUILDING_TYPES[type];
+  if(!s||type==="hq"||!positionClearOfBlockedTerrain(x,y,s.radius)) return false;
+  if(tileAtWorld(x,y)===RESOURCE) return false;
+  for(const b of buildings) if(b.hp>0&&Math.hypot(x-b.x,y-b.y)<s.radius+b.radius+18) return false;
+  for(const r of resourceNodes) if((typeof r.amount!=="number"||r.amount>0)&&Math.hypot(x-r.x,y-r.y)<s.radius+r.radius+16) return false;
+  return true;
+}
 
 function applyCommand(team,cmd){
   if(!cmd||gameOver) return;
@@ -783,13 +817,49 @@ function applyCommand(team,cmd){
     for(const u of unitsForIds(team,cmd.ids)) u.orders=[];
   }else if(cmd.type==="gather"){
     const node=getResourceNode(cmd.nodeId);
-    if(!node||node.amount<=0||(node.team!==team&&node.team!==TEAM_NEUTRAL)) return;
+    if(!node||node.amount<=0) return;
     for(const u of unitsForIds(team,cmd.ids)){
       if(u.type==="worker") startGather(u,node);
     }
+  }else if(cmd.type==="build"){
+    const type=String(cmd.buildingType||"");
+    const s=BUILDING_TYPES[type];
+    const builders=unitsForIds(team,cmd.ids).filter(u=>u.type==="worker");
+    const x=Math.max(8,Math.min(WORLD_W-8,Number(cmd.x)||0));
+    const y=Math.max(8,Math.min(WORLD_H-8,Number(cmd.y)||0));
+    if(!s||type==="hq"||!builders.length||teamResources[team]<s.cost||!canPlaceBuilding(type,x,y)) return;
+    teamResources[team]-=s.cost;
+    const building=makeBuilding(type,team,x,y,false);
+    for(const u of builders) u.orders=[{type:"build",targetId:building.id,x,y}];
+  }else if(cmd.type==="assistBuild"){
+    const building=getEntity(Number(cmd.targetId));
+    if(!building||building.kind!=="building"||building.team!==team||building.complete) return;
+    for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="worker")){
+      const order={type:"build",targetId:building.id,x:building.x,y:building.y};
+      if(cmd.queue) u.orders.push(order); else u.orders=[order];
+    }
+  }else if(cmd.type==="healTarget"){
+    const target=getEntity(Number(cmd.targetId));
+    if(!target||target.team!==team||target.kind!=="unit"||unitArmor(target)!=="human") return;
+    for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="medic")){
+      const order={type:"healTarget",targetId:target.id,x:target.x,y:target.y};
+      if(cmd.queue) u.orders.push(order); else u.orders=[order];
+    }
+  }else if(cmd.type==="attackTarget"){
+    const target=getEntity(Number(cmd.targetId));
+    if(!target||target.team===team) return;
+    if(target.kind==="unit"&&!pointVisibleTo(team,target.x,target.y)) return;
+    if(target.kind==="building"&&target.type!=="hq"&&!pointVisibleTo(team,target.x,target.y)) return;
+    for(const u of unitsForIds(team,cmd.ids).filter(u=>canAttackTarget(u,target))){
+      const order={type:"attackTarget",targetId:target.id,x:target.x,y:target.y};
+      if(cmd.queue) u.orders.push(order); else u.orders=[order];
+    }
   }else if(cmd.type==="produce"){
-    const hq=hqByTeam[team];
-    if(hq) queueUnit(hq,cmd.unitType,team);
+    const building=getEntity(Number(cmd.buildingId));
+    const produces=BUILDING_TYPES[building?.type]?.produces||[];
+    if(building?.kind==="building"&&building.team===team&&building.complete&&produces.includes(cmd.unitType)){
+      queueUnit(building,cmd.unitType,team);
+    }
   }
 }
 
@@ -839,7 +909,8 @@ function findShortestTilePath(startX,startY,targetX,targetY,radius,arrivalRadius
   const targetTile=gy*MAP_W+gx;
   const start=sy*MAP_W+sx,total=MAP_W*MAP_H;
   const isGoal=index=>{
-    if(arrivalRadius<=0) return index===targetTile;
+    if(index===targetTile) return true;
+    if(arrivalRadius<=0) return false;
     const tx=index%MAP_W,ty=Math.floor(index/MAP_W);
     return Math.hypot((tx+.5)*TILE-targetX,(ty+.5)*TILE-targetY)<=arrivalRadius;
   };
@@ -883,13 +954,16 @@ function hasLineOfSight(ax,ay,bx,by){
 }
 function visionSources(team){
   const arr=[];
-  for(const u of units) if(u.team===team&&u.hp>0) arr.push({x:u.x,y:u.y,vision:UNIT_TYPES[u.type].vision});
-  for(const b of buildings) if(b.team===team&&b.hp>0) arr.push({x:b.x,y:b.y,vision:b.vision});
+  for(const u of units) if(u.team===team&&u.hp>0){
+    const s=UNIT_TYPES[u.type];
+    arr.push({x:u.x,y:u.y,vision:s.vision,unobstructed:s.layer==="air"});
+  }
+  for(const b of buildings) if(b.team===team&&b.hp>0&&b.complete!==false) arr.push({x:b.x,y:b.y,vision:b.vision});
   return arr;
 }
 function pointVisibleTo(team,x,y){
   for(const s of visionSources(team)){
-    if(Math.hypot(x-s.x,y-s.y)<=s.vision && hasLineOfSight(s.x,s.y,x,y)) return true;
+    if(Math.hypot(x-s.x,y-s.y)<=s.vision && (s.unobstructed||hasLineOfSight(s.x,s.y,x,y))) return true;
   }
   return false;
 }
@@ -918,7 +992,7 @@ function moveToward(u,tx,ty,dt){
   if(d<2) return true;
   const step=Math.min(d,UNIT_TYPES[u.type].speed*dt);
   const nx=u.x+dx/d*step,ny=u.y+dy/d*step;
-  if(canStep(u.x,u.y,nx,ny,u.radius)){u.x=nx;u.y=ny;}
+  if(UNIT_TYPES[u.type].layer==="air"||canStep(u.x,u.y,nx,ny,u.radius)){u.x=nx;u.y=ny;}
   else return false; // 길찾기 없음
   return d<=UNIT_TYPES[u.type].speed*dt+2;
 }
@@ -961,7 +1035,7 @@ function moveGatherAlongPath(u,tx,ty,arrivalRadius,dt){
 function nearestAttackable(u,maxRange){
   let best=null,bd=Infinity;
   for(const e of [...units,...buildings]){
-    if(e.hp<=0||e.team===u.team) continue;
+    if(e.hp<=0||e.team===u.team||!canAttackTarget(u,e)) continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
     if(d<=maxRange&&d<bd&&hasLineOfSight(u.x,u.y,e.x,e.y)&&pointVisibleTo(u.team,e.x,e.y)){
       best=e;bd=d;
@@ -969,12 +1043,20 @@ function nearestAttackable(u,maxRange){
   }
   return best;
 }
-function counterMult(attacker,target){
-  return attacker.kind==="unit"&&target.kind==="unit"&&advantage[attacker.type]===target.type ? COUNTER_MULT : 1;
+function canAttackTarget(attacker,target){
+  const s=UNIT_TYPES[attacker.type];
+  return !!s?.targets?.includes(unitLayer(target));
+}
+function damageTypeMult(attacker,target){
+  const armor=unitArmor(target);
+  if(attacker.type==="sniper") return armor==="human"?1.9:armor==="heavy"?.16:.45;
+  if(attacker.type==="antitank") return armor==="heavy"?2.5:armor==="human"?.5:.25;
+  if(attacker.type==="antiair") return armor==="air"?4:.22;
+  return 1;
 }
 function finalDamage(attacker,target,base){
-  let d=base*counterMult(attacker,target);
-  if(tileAtWorld(target.x,target.y)===HILL) d*=HILL_DAMAGE_MULT;
+  let d=base*damageTypeMult(attacker,target);
+  if(unitLayer(target)==="ground"&&tileAtWorld(target.x,target.y)===HILL) d*=HILL_DAMAGE_MULT;
   return d;
 }
 function addDamageText(target,amount,label=""){
@@ -999,14 +1081,6 @@ function fireAt(u,target,nowSec){
     u.shotCount=(u.shotCount||0)+1;
     if(u.shotCount%4===0){ base*=1.5; label="제압"; }
   }
-  if(u.type==="sniper" && nowSec-(u.lastFireAt||-999)>=3){
-    base*=1.35; label="정밀";
-  }
-  if(u.type==="assault"){
-    const d=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
-    if(d<=55) reload*=0.80;
-  }
-
   u.cooldown=reload;
   u.lastFireAt=nowSec;
 
@@ -1024,9 +1098,9 @@ function updateProjectiles(dt){
     if(d<=st+target.radius){
       applyDamage(attacker,target,p.baseDamage,p.label);
 
-      if(p.fromType==="armored"){
+      if(p.fromType==="heavyTank"){
         for(const e of [...units,...buildings]){
-          if(e.hp<=0||e.team===attacker.team||e.id===target.id) continue;
+          if(e.hp<=0||e.team===attacker.team||e.id===target.id||unitLayer(e)!=="ground") continue;
           if(Math.hypot(e.x-target.x,e.y-target.y)<=55+e.radius){
             applyDamage(attacker,e,p.baseDamage*0.45,"폭발");
           }
@@ -1079,7 +1153,8 @@ function autoRepair(u,dt){
   let best=null,bd=90;
   for(const e of [...units,...buildings]){
     if(e.team!==u.team||e.hp<=0||e.hp>=e.maxHp) continue;
-    if(e.kind==="unit"&&e.type!=="armored") continue;
+    if(e.kind==="building"&&e.complete===false) continue;
+    if(e.kind==="unit"&&e.type!=="heavyTank") continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
     if(d<bd){best=e;bd=d;}
   }
@@ -1087,9 +1162,54 @@ function autoRepair(u,dt){
     best.hp=Math.min(best.maxHp,best.hp+3*dt);
   }
 }
+function nearestHealable(u,maxRange){
+  let best=null,bd=Infinity;
+  for(const e of units){
+    if(e.hp<=0||e.team!==u.team||e.id===u.id||unitArmor(e)!=="human"||e.hp>=e.maxHp) continue;
+    const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
+    if(d<=maxRange&&d<bd){best=e;bd=d;}
+  }
+  return best;
+}
 function workersIgnoreCollisionWhileGathering(a,b){
   return a.type==="worker"&&b.type==="worker"&&
     (a.orders[0]?.type==="gather"||b.orders[0]?.type==="gather");
+}
+function updateAttackTarget(u,o,dt,nowSec){
+  const target=getEntity(o.targetId);
+  if(!target||target.team===u.team||!canAttackTarget(u,target)){u.orders.shift();return;}
+  const visible=pointVisibleTo(u.team,target.x,target.y);
+  if(visible){o.x=target.x;o.y=target.y;}
+  const tx=visible?target.x:o.x,ty=visible?target.y:o.y;
+  const distance=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
+  if(visible&&distance<=UNIT_TYPES[u.type].range&&hasLineOfSight(u.x,u.y,target.x,target.y)){
+    fireAt(u,target,nowSec);
+  }else if(moveToward(u,tx,ty,dt)&&!visible){
+    u.orders.shift();
+  }
+}
+function updateHealTarget(u,o,dt){
+  const target=getEntity(o.targetId),s=UNIT_TYPES[u.type];
+  if(!target||target.team!==u.team||target.kind!=="unit"||unitArmor(target)!=="human"||target.hp>=target.maxHp){
+    u.orders.shift();return;
+  }
+  o.x=target.x;o.y=target.y;
+  const distance=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
+  if(distance<=s.healRange){
+    target.hp=Math.min(target.maxHp,target.hp+s.healRate*dt);
+  }else moveToward(u,target.x,target.y,dt);
+}
+function updateBuildOrder(u,o,dt){
+  const building=getEntity(o.targetId);
+  if(!building||building.kind!=="building"||building.team!==u.team){u.orders.shift();return;}
+  if(building.complete){u.orders.shift();return;}
+  const distance=Math.hypot(building.x-u.x,building.y-u.y)-building.radius;
+  if(distance<=22){
+    building.buildRemaining=Math.max(0,building.buildRemaining-dt);
+    const progress=1-building.buildRemaining/Math.max(.01,building.buildTime);
+    building.hp=Math.max(1,building.maxHp*progress);
+    if(building.buildRemaining<=0){building.complete=true;building.hp=building.maxHp;u.orders.shift();}
+  }else moveToward(u,building.x,building.y,dt);
 }
 function updateUnits(dt,nowSec){
   for(const u of units){
@@ -1098,9 +1218,15 @@ function updateUnits(dt,nowSec){
     const o=u.orders[0];
 
     if(o?.type==="gather"&&u.type==="worker"){ updateGather(u,o,dt); continue; }
+    if(o?.type==="build"&&u.type==="worker"){updateBuildOrder(u,o,dt);continue;}
+    if(o?.type==="healTarget"&&u.type==="medic"){updateHealTarget(u,o,dt);continue;}
     if(o?.type==="move"){
       if(moveToward(u,o.x,o.y,dt)) u.orders.shift();
       continue; // 절대이동 중 공격 불가
+    }
+    if(o?.type==="attackTarget"){
+      updateAttackTarget(u,o,dt,nowSec);
+      continue;
     }
     if(o?.type==="attackMove"){
       const t=nearestAttackable(u,UNIT_TYPES[u.type].range);
@@ -1110,6 +1236,14 @@ function updateUnits(dt,nowSec){
     }
     if(!o){
       if(u.type==="worker") autoRepair(u,dt);
+      else if(u.type==="medic"){
+        const heal=nearestHealable(u,UNIT_TYPES.medic.healRange);
+        if(heal) heal.hp=Math.min(heal.maxHp,heal.hp+UNIT_TYPES.medic.healRate*dt);
+        else{
+          const t=nearestAttackable(u,UNIT_TYPES[u.type].range);
+          if(t) fireAt(u,t,nowSec);
+        }
+      }
       else{
         const t=nearestAttackable(u,UNIT_TYPES[u.type].range);
         if(t) fireAt(u,t,nowSec);
@@ -1121,6 +1255,7 @@ function updateUnits(dt,nowSec){
     const a=units[i]; if(a.hp<=0)continue;
     for(let j=i+1;j<units.length;j++){
       const b=units[j]; if(b.hp<=0||a.team!==b.team)continue;
+      if(unitLayer(a)!==unitLayer(b)) continue;
       if(workersIgnoreCollisionWhileGathering(a,b)) continue;
       const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),minD=(a.radius+b.radius)*.75;
       if(d>0&&d<minD){
@@ -1135,33 +1270,34 @@ function currentPop(team){
   return units.filter(u=>u.team===team&&u.hp>0).length;
 }
 function queuedPop(team){
-  const hq=hqByTeam[team];
-  return hq ? hq.queue.length : 0;
+  return buildings.filter(b=>b.team===team&&b.hp>0).reduce((sum,b)=>sum+(b.queue?.length||0),0);
 }
-function queueUnit(hq,type,team){
+function queueUnit(building,type,team){
   const s=UNIT_TYPES[type];
-  if(!s||!hq||hq.hp<=0) return false;
+  const produces=BUILDING_TYPES[building?.type]?.produces||[];
+  if(!s||!building||building.hp<=0||!building.complete||!produces.includes(type)) return false;
   if(currentPop(team)+queuedPop(team)>=POP_CAP) return false;
   if(teamResources[team]<s.cost) return false;
   teamResources[team]-=s.cost;
-  hq.queue.push({type,time:s.build,max:s.build});
+  building.queue.push({type,time:s.build,max:s.build});
   return true;
 }
-function spawnNearHQ(hq,type){
-  const dir=hq.team===TEAM_LEFT?1:-1;
-  const baseX=hq.x+dir*72;
+function spawnNearBuilding(building,type){
+  const dir=building.team===TEAM_LEFT?1:-1;
+  const baseX=building.x+dir*(building.radius+38),s=UNIT_TYPES[type];
+  if(s.layer==="air") return makeUnit(type,building.team,baseX,building.y-building.radius-24);
   for(let k=0;k<14;k++){
     const a=k/14*Math.PI*2;
-    const x=baseX+Math.cos(a)*32,y=hq.y+Math.sin(a)*64;
-    if(tileAtWorld(x,y)!==WALL) return makeUnit(type,hq.team,x,y);
+    const x=baseX+Math.cos(a)*38,y=building.y+Math.sin(a)*58;
+    if(positionClearOfBlockedTerrain(x,y,s.radius)) return makeUnit(type,building.team,x,y);
   }
-  return makeUnit(type,hq.team,baseX,hq.y);
+  return makeUnit(type,building.team,baseX,building.y);
 }
 function updateBuildings(dt){
-  for(const hq of hqByTeam){
-    if(!hq||hq.hp<=0||!hq.queue.length) continue;
-    const q=hq.queue[0];q.time-=dt;
-    if(q.time<=0){spawnNearHQ(hq,q.type);hq.queue.shift();}
+  for(const building of buildings){
+    if(!building.complete||building.hp<=0||!building.queue.length) continue;
+    const q=building.queue[0];q.time-=dt;
+    if(q.time<=0){spawnNearBuilding(building,q.type);building.queue.shift();}
   }
 }
 function removeDead(){
@@ -1178,6 +1314,16 @@ function checkGameOver(){
 
 /* 간단 싱글 테스트 AI */
 let aiBuildTimer=0,aiWaveTimer=0;
+function findAIBuildSite(team,type){
+  const hq=hqByTeam[team],dir=team===TEAM_LEFT?1:-1;
+  if(!hq)return null;
+  const offsets=[[150,-105],[150,105],[235,0],[235,-120],[235,120]];
+  for(const [forward,side] of offsets){
+    const x=hq.x+dir*forward,y=hq.y+side;
+    if(canPlaceBuilding(type,x,y))return{x,y};
+  }
+  return null;
+}
 function updateSoloAI(dt){
   if(role!=="solo"||gameOver)return;
   aiBuildTimer+=dt;aiWaveTimer+=dt;
@@ -1186,10 +1332,19 @@ function updateSoloAI(dt){
 
   if(aiBuildTimer>2.0){
     aiBuildTimer=0;
-    const order=["infantry","assault","sniper","armored"];
-    const counts=Object.fromEntries(order.map(t=>[t,units.filter(u=>u.team===team&&u.type===t).length]));
-    order.sort((a,b)=>counts[a]-counts[b]);
-    queueUnit(hq,order[0],team);
+    for(const type of ["barracks","factory","airport"]){
+      if(buildings.some(b=>b.team===team&&b.type===type&&b.hp>0))continue;
+      const worker=units.find(u=>u.team===team&&u.type==="worker"&&u.hp>0),site=findAIBuildSite(team,type);
+      if(worker&&site&&teamResources[team]>=BUILDING_TYPES[type].cost){
+        applyCommand(team,{type:"build",ids:[worker.id],buildingType:type,x:site.x,y:site.y});
+      }
+      break;
+    }
+    const producers=buildings.filter(b=>b.team===team&&b.complete&&b.hp>0&&b.type!=="hq");
+    const choices=[];
+    for(const b of producers)for(const type of BUILDING_TYPES[b.type].produces)choices.push({b,type});
+    choices.sort((a,b)=>units.filter(u=>u.team===team&&u.type===a.type).length-units.filter(u=>u.team===team&&u.type===b.type).length);
+    if(choices.length)queueUnit(choices[0].b,choices[0].type,team);
   }
   if(aiWaveTimer>10){
     aiWaveTimer=0;
@@ -1210,10 +1365,11 @@ function updateSoloAI(dt){
 /* =========================
    입력 / 선택 / 카메라
 ========================= */
-const camera={x:0,y:0,speed:680};
+const camera={x:0,y:0,speed:680,zoom:1,minZoom:1,maxZoom:2.25};
 const mouse={x:0,y:0,worldX:0,worldY:0,down:false,startX:0,startY:0,drag:false};
 let selectedIds=[];
 let attackMoveMode=false;
+let buildPlacementMode=null;
 const controlGroups=Array.from({length:10},()=>[]);
 let controlGroupNotice="",controlGroupNoticeUntil=0;
 
@@ -1227,18 +1383,20 @@ function resize(){
 addEventListener("resize",resize);resize();
 
 function clampCamera(){
-  camera.x=Math.max(0,Math.min(camera.x,Math.max(0,WORLD_W-innerWidth)));
-  camera.y=Math.max(0,Math.min(camera.y,Math.max(0,WORLD_H-innerHeight)));
+  const viewW=innerWidth/camera.zoom,viewH=innerHeight/camera.zoom;
+  camera.x=Math.max(0,Math.min(camera.x,Math.max(0,WORLD_W-viewW)));
+  camera.y=Math.max(0,Math.min(camera.y,Math.max(0,WORLD_H-viewH)));
 }
 function centerCameraForTeam(team){
   const hq=hqByTeam[team];
   if(!hq)return;
-  camera.x=hq.x-innerWidth*(team===0?.35:.65);
-  camera.y=hq.y-innerHeight*.5;
+  const viewW=innerWidth/camera.zoom,viewH=innerHeight/camera.zoom;
+  camera.x=hq.x-viewW*(team===0?.35:.65);
+  camera.y=hq.y-viewH*.5;
   clampCamera();
 }
 function worldToScreen(x,y){return{x:x-camera.x,y:y-camera.y};}
-function screenToWorld(x,y){return{x:x+camera.x,y:y+camera.y};}
+function screenToWorld(x,y){return{x:x/camera.zoom+camera.x,y:y/camera.zoom+camera.y};}
 function selectedEntities(){
   const set=new Set(selectedIds);
   return [...units,...buildings].filter(e=>set.has(e.id)&&e.hp>0);
@@ -1270,6 +1428,7 @@ function handleControlGroupKey(e){
     controlGroups[number]=controlGroups[number].filter(id=>alive.has(id));
     selectedIds=controlGroups[number].slice();
     attackMoveMode=false;
+    buildPlacementMode=null;
     showControlGroupNotice(`부대 ${number} 선택 · ${selectedIds.length}명`);
   }
   return true;
@@ -1284,8 +1443,19 @@ function entityAtWorld(x,y,team){
   }
   return best;
 }
+function enemyEntityAtWorld(x,y,team){
+  let best=null,bd=Infinity;
+  for(const e of [...units,...buildings]){
+    if(e.team===team||(typeof e.hp==="number"&&e.hp<=0)) continue;
+    if(e.kind==="unit"&&!entityVisibleTo(team,e)) continue;
+    if(e.kind==="building"&&e.type!=="hq"&&!entityVisibleTo(team,e)) continue;
+    const p=displayPos(e),d=Math.hypot(x-p.x,y-p.y);
+    if(d<=e.radius+8&&d<bd){best=e;bd=d;}
+  }
+  return best;
+}
 function resourceAtWorld(x,y,team){
-  return resourceNodes.find(r=>r.amount>0&&(r.team===team||r.team===TEAM_NEUTRAL)&&Math.hypot(x-r.x,y-r.y)<=r.radius+12)||null;
+  return resourceNodes.find(r=>(typeof r.amount!=="number"||r.amount>0)&&Math.hypot(x-r.x,y-r.y)<=r.radius+12)||null;
 }
 
 canvas.addEventListener("mousemove",e=>{
@@ -1299,6 +1469,17 @@ canvas.addEventListener("mousedown",e=>{
     mouse.down=true;mouse.startX=e.clientX;mouse.startY=e.clientY;mouse.drag=false;
   }
 });
+canvas.addEventListener("wheel",e=>{
+  if(!started)return;
+  e.preventDefault();
+  const anchor=screenToWorld(e.clientX,e.clientY);
+  const next=Math.max(camera.minZoom,Math.min(camera.maxZoom,camera.zoom*Math.exp(-e.deltaY*.001)));
+  if(Math.abs(next-camera.zoom)<.001)return;
+  camera.zoom=next;
+  camera.x=anchor.x-e.clientX/camera.zoom;
+  camera.y=anchor.y-e.clientY/camera.zoom;
+  clampCamera();
+},{passive:false});
 canvas.addEventListener("mouseup",e=>{
   if(!started||gameOver||gamePaused)return;
   const w=screenToWorld(e.clientX,e.clientY);
@@ -1307,15 +1488,24 @@ canvas.addEventListener("mouseup",e=>{
     mouse.down=false;
     if(handleBottomUI(e.clientX,e.clientY)){mouse.drag=false;return;}
 
+    if(buildPlacementMode){
+      const ids=selectedEntities().filter(s=>s.kind==="unit"&&s.team===localTeam&&s.type==="worker").map(s=>s.id);
+      if(ids.length) sendOrApplyCommand({type:"build",ids,buildingType:buildPlacementMode,x:w.x,y:w.y});
+      buildPlacementMode=null;mouse.drag=false;return;
+    }
+
     if(attackMoveMode){
       const ids=selectedEntities().filter(s=>s.kind==="unit"&&s.team===localTeam).map(s=>s.id);
-      if(ids.length) sendOrApplyCommand({type:"attackMove",ids,x:w.x,y:w.y,queue:false});
+      const target=enemyEntityAtWorld(w.x,w.y,localTeam);
+      if(ids.length&&target) sendOrApplyCommand({type:"attackTarget",ids,targetId:target.id,queue:false});
+      else if(ids.length) sendOrApplyCommand({type:"attackMove",ids,x:w.x,y:w.y,queue:false});
       attackMoveMode=false;mouse.drag=false;return;
     }
 
     if(mouse.drag){
-      const x1=Math.min(mouse.startX,e.clientX)+camera.x,y1=Math.min(mouse.startY,e.clientY)+camera.y;
-      const x2=Math.max(mouse.startX,e.clientX)+camera.x,y2=Math.max(mouse.startY,e.clientY)+camera.y;
+      const start=screenToWorld(mouse.startX,mouse.startY),end=screenToWorld(e.clientX,e.clientY);
+      const x1=Math.min(start.x,end.x),y1=Math.min(start.y,end.y);
+      const x2=Math.max(start.x,end.x),y2=Math.max(start.y,end.y);
       selectedIds=units.filter(u=>u.team===localTeam&&u.x>=x1&&u.x<=x2&&u.y>=y1&&u.y<=y2).map(u=>u.id);
     }else{
       const hit=entityAtWorld(w.x,w.y,localTeam);
@@ -1329,10 +1519,26 @@ canvas.addEventListener("mouseup",e=>{
   }
 
   if(e.button===2){
+    if(buildPlacementMode){buildPlacementMode=null;return;}
     const us=selectedEntities().filter(s=>s.kind==="unit"&&s.team===localTeam);
     if(!us.length)return;
-    const node=resourceAtWorld(w.x,w.y,localTeam);
+    const target=enemyEntityAtWorld(w.x,w.y,localTeam);
+    if(target){
+      sendOrApplyCommand({type:"attackTarget",ids:us.map(u=>u.id),targetId:target.id,queue:e.ctrlKey});
+      return;
+    }
+    const ally=entityAtWorld(w.x,w.y,localTeam);
     const workers=us.filter(u=>u.type==="worker");
+    if(ally?.kind==="building"&&ally.complete===false&&workers.length){
+      sendOrApplyCommand({type:"assistBuild",ids:workers.map(u=>u.id),targetId:ally.id,queue:e.ctrlKey});
+      return;
+    }
+    const medics=us.filter(u=>u.type==="medic");
+    if(ally?.kind==="unit"&&ally.hp<ally.maxHp&&unitArmor(ally)==="human"&&medics.length){
+      sendOrApplyCommand({type:"healTarget",ids:medics.map(u=>u.id),targetId:ally.id,queue:e.ctrlKey});
+      return;
+    }
+    const node=resourceAtWorld(w.x,w.y,localTeam);
     if(node&&workers.length){
       sendOrApplyCommand({type:"gather",ids:workers.map(u=>u.id),nodeId:node.id});
       return;
@@ -1342,7 +1548,9 @@ canvas.addEventListener("mouseup",e=>{
 });
 addEventListener("keydown",e=>{
   if(handleControlGroupKey(e)) return;
-  if(e.key.toLowerCase()==="a"&&selectedEntities().some(s=>s.kind==="unit"&&s.team===localTeam))attackMoveMode=true;
+  if(e.key.toLowerCase()==="a"&&selectedEntities().some(s=>s.kind==="unit"&&s.team===localTeam)){
+    attackMoveMode=true;buildPlacementMode=null;
+  }
   if(e.key.toLowerCase()==="s"){
     const ids=selectedEntities().filter(s=>s.kind==="unit"&&s.team===localTeam).map(s=>s.id);
     if(ids.length&&started&&!gameOver){
@@ -1351,7 +1559,7 @@ addEventListener("keydown",e=>{
       sendOrApplyCommand({type:"stop",ids});
     }
   }
-  if(e.key==="Escape")attackMoveMode=false;
+  if(e.key==="Escape"){attackMoveMode=false;buildPlacementMode=null;}
 });
 
 function updateCamera(dt){
@@ -1380,9 +1588,10 @@ addEventListener("focus",updateHostWindowPause);
    렌더링
 ========================= */
 function drawTerrain(){
+  const viewW=innerWidth/camera.zoom,viewH=innerHeight/camera.zoom;
   const sx0=Math.max(0,Math.floor(camera.x/TILE)),sy0=Math.max(0,Math.floor(camera.y/TILE));
-  const sx1=Math.min(MAP_W-1,Math.ceil((camera.x+innerWidth)/TILE));
-  const sy1=Math.min(MAP_H-1,Math.ceil((camera.y+innerHeight)/TILE));
+  const sx1=Math.min(MAP_W-1,Math.ceil((camera.x+viewW)/TILE));
+  const sy1=Math.min(MAP_H-1,Math.ceil((camera.y+viewH)/TILE));
   for(let y=sy0;y<=sy1;y++)for(let x=sx0;x<=sx1;x++){
     const t=terrain[y][x],sx=x*TILE-camera.x,sy=y*TILE-camera.y;
     ctx.fillStyle=t===GROUND||t===RESOURCE?"#557a4a":t===HILL?"#82744f":t===RAMP?"#9a875b":t===WATER?"#275c72":t===VOID?"#080b0e":"#2d3237";
@@ -1444,26 +1653,42 @@ function drawResource(r){
 function drawBuilding(b){
   if(typeof b.hp==="number"&&b.hp<=0)return;
   const visible=entityVisibleTo(localTeam,b);
+  if(!visible&&b.type!=="hq")return;
   const p=displayPos(b),s=worldToScreen(p.x,p.y),sel=selectedIds.includes(b.id);
   ctx.save();ctx.translate(s.x,s.y);ctx.globalAlpha=visible?1:.48;
-  ctx.fillStyle=b.team===localTeam?"#4b8ddb":"#d45353";
-  ctx.fillRect(-38,-38,76,76);
-  ctx.fillStyle="rgba(255,255,255,.18)";ctx.fillRect(-30,-30,60,16);
-  ctx.strokeStyle=sel?"#fff":"rgba(0,0,0,.45)";ctx.lineWidth=sel?3:2;ctx.strokeRect(-40,-40,80,80);
-  ctx.fillStyle="#fff";ctx.font="bold 12px sans-serif";ctx.textAlign="center";ctx.fillText(visible?"사령부":"적 사령부 위치",0,5);
+  const r=b.radius||36;
+  const accent=b.type==="barracks"?"#6d8f58":b.type==="factory"?"#667483":b.type==="airport"?"#6d67a0":"#4b8ddb";
+  ctx.fillStyle=b.team===localTeam?accent:"#b95050";
+  ctx.fillRect(-r,-r,r*2,r*2);
+  ctx.fillStyle="rgba(255,255,255,.18)";ctx.fillRect(-r+8,-r+8,r*2-16,Math.max(10,r*.38));
+  if(b.type==="airport"){
+    ctx.strokeStyle="rgba(255,255,255,.55)";ctx.lineWidth=4;
+    ctx.beginPath();ctx.moveTo(-r+10,0);ctx.lineTo(r-10,0);ctx.moveTo(0,-r+10);ctx.lineTo(0,r-10);ctx.stroke();
+  }
+  ctx.strokeStyle=sel?"#fff":"rgba(0,0,0,.45)";ctx.lineWidth=sel?3:2;ctx.strokeRect(-r-2,-r-2,r*2+4,r*2+4);
+  ctx.fillStyle="#fff";ctx.font="bold 12px sans-serif";ctx.textAlign="center";
+  const label=visible?(b.complete===false?`${b.name} 건설 중`:b.name):"적 사령부 위치";
+  ctx.fillText(label,0,5);
   ctx.restore();
-  if(visible&&typeof b.hp==="number") drawHealth(b,s.x,s.y,76);
-  if(visible&&b.queue?.length){
+  if(visible&&typeof b.hp==="number") drawHealth(b,s.x,s.y,r*2);
+  if(visible&&b.complete===false){
+    const v=1-(b.buildRemaining||0)/Math.max(.01,b.buildTime||1);
+    ctx.fillStyle="rgba(0,0,0,.65)";ctx.fillRect(s.x-r,s.y+r+11,r*2,6);
+    ctx.fillStyle="#7dffa4";ctx.fillRect(s.x-r,s.y+r+11,r*2*Math.max(0,Math.min(1,v)),6);
+  }else if(visible&&b.queue?.length){
     const q=b.queue[0],v=1-q.time/q.max;
-    ctx.fillStyle="rgba(0,0,0,.65)";ctx.fillRect(s.x-36,s.y+50,72,6);
-    ctx.fillStyle="#f4d35e";ctx.fillRect(s.x-36,s.y+50,72*v,6);
+    ctx.fillStyle="rgba(0,0,0,.65)";ctx.fillRect(s.x-r,s.y+r+11,r*2,6);
+    ctx.fillStyle="#f4d35e";ctx.fillRect(s.x-r,s.y+r+11,r*2*v,6);
   }
 }
 function unitColor(u){
   if(u.type==="worker")return u.team===localTeam?"#9fd3ff":"#ff9f9f";
   if(u.type==="sniper")return u.team===localTeam?"#9d86ff":"#d889ff";
-  if(u.type==="armored")return u.team===localTeam?"#5f8fb7":"#b75f5f";
-  if(u.type==="assault")return u.team===localTeam?"#65d6d0":"#ff9a59";
+  if(u.type==="medic")return u.team===localTeam?"#75e0a0":"#e88b8b";
+  if(u.type==="antitank")return u.team===localTeam?"#d0a85e":"#d47a58";
+  if(u.type==="antiair")return u.team===localTeam?"#65d6d0":"#e89662";
+  if(u.type==="heavyTank")return u.team===localTeam?"#5f8fb7":"#b75f5f";
+  if(u.type==="lightAircraft")return u.team===localTeam?"#a7d8e8":"#e8a7a7";
   return u.team===localTeam?"#78b8ff":"#ff7777";
 }
 function drawUnit(u){
@@ -1471,15 +1696,23 @@ function drawUnit(u){
   const p=displayPos(u),s=worldToScreen(p.x,p.y),sel=selectedIds.includes(u.id);
   ctx.save();ctx.translate(s.x,s.y);ctx.fillStyle=unitColor(u);
   ctx.strokeStyle=sel?"#fff":"rgba(0,0,0,.55)";ctx.lineWidth=sel?3:2;
-  if(u.type==="armored"){
+  if(u.type==="heavyTank"){
     ctx.fillRect(-18,-14,36,28);ctx.strokeRect(-18,-14,36,28);
     ctx.fillStyle="rgba(20,20,20,.5)";ctx.fillRect(-4,-20,8,17);
+  }else if(u.type==="lightAircraft"){
+    ctx.beginPath();ctx.moveTo(0,-20);ctx.lineTo(7,-4);ctx.lineTo(22,8);ctx.lineTo(6,6);ctx.lineTo(0,18);ctx.lineTo(-6,6);ctx.lineTo(-22,8);ctx.lineTo(-7,-4);ctx.closePath();ctx.fill();ctx.stroke();
   }else if(u.type==="sniper"){
     ctx.beginPath();ctx.moveTo(0,-14);ctx.lineTo(13,11);ctx.lineTo(-13,11);ctx.closePath();ctx.fill();ctx.stroke();
     ctx.strokeStyle="#111";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,-3);ctx.lineTo(18,-10);ctx.stroke();
-  }else if(u.type==="assault"){
+  }else if(u.type==="medic"){
     ctx.beginPath();ctx.arc(0,0,14,0,Math.PI*2);ctx.fill();ctx.stroke();
-    ctx.fillStyle="rgba(255,255,255,.34)";ctx.fillRect(-7,-4,14,8);
+    ctx.fillStyle="#fff";ctx.fillRect(-3,-9,6,18);ctx.fillRect(-9,-3,18,6);
+  }else if(u.type==="antitank"){
+    ctx.fillRect(-13,-12,26,24);ctx.strokeRect(-13,-12,26,24);
+    ctx.strokeStyle="#222";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(-7,-4);ctx.lineTo(18,-15);ctx.stroke();
+  }else if(u.type==="antiair"){
+    ctx.beginPath();ctx.moveTo(0,-15);ctx.lineTo(15,0);ctx.lineTo(0,15);ctx.lineTo(-15,0);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.strokeStyle="#222";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-5,-4);ctx.lineTo(-10,-17);ctx.moveTo(5,-4);ctx.lineTo(10,-17);ctx.stroke();
   }else if(u.type==="worker"){
     ctx.fillRect(-11,-11,22,22);ctx.strokeRect(-11,-11,22,22);
     ctx.strokeStyle="#222";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(-15,-14);ctx.lineTo(14,14);ctx.stroke();
@@ -1495,7 +1728,7 @@ function drawUnit(u){
     for(const o of u.orders){
       if(typeof o.x!=="number")continue;
       const q=worldToScreen(o.x,o.y);
-      ctx.strokeStyle=o.type==="attackMove"?"rgba(255,210,70,.8)":"rgba(150,220,255,.65)";
+      ctx.strokeStyle=o.type==="attackTarget"?"rgba(255,90,90,.9)":o.type==="attackMove"?"rgba(255,210,70,.8)":"rgba(150,220,255,.65)";
       ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(q.x,q.y);ctx.stroke();
       ctx.beginPath();ctx.arc(q.x,q.y,5,0,Math.PI*2);ctx.stroke();px=q.x;py=q.y;
     }
@@ -1510,8 +1743,9 @@ function drawProjectiles(){
   }
 }
 function drawFog(){
+  const viewW=innerWidth/camera.zoom,viewH=innerHeight/camera.zoom;
   const x0=Math.max(0,Math.floor(camera.x/TILE)),y0=Math.max(0,Math.floor(camera.y/TILE));
-  const x1=Math.min(MAP_W-1,Math.ceil((camera.x+innerWidth)/TILE)),y1=Math.min(MAP_H-1,Math.ceil((camera.y+innerHeight)/TILE));
+  const x1=Math.min(MAP_W-1,Math.ceil((camera.x+viewW)/TILE)),y1=Math.min(MAP_H-1,Math.ceil((camera.y+viewH)/TILE));
   ctx.fillStyle="rgba(8,12,15,.56)";
   for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
     const cx=(x+.5)*TILE,cy=(y+.5)*TILE;
@@ -1525,30 +1759,49 @@ function drawSelectionBox(){
   ctx.strokeStyle="rgba(130,210,255,.9)";ctx.strokeRect(x+.5,y+.5,w,h);
 }
 
-const prodButtons=[
-  {type:"worker",label:"일꾼"},
-  {type:"infantry",label:"보병"},
-  {type:"sniper",label:"저격"},
-  {type:"armored",label:"장갑차"},
-  {type:"assault",label:"돌격병"}
-];
+const buildButtons=["barracks","factory","airport"];
 function bottomPanelRect(){return{x:innerWidth/2-330,y:innerHeight-118,w:660,h:106};}
 function handleBottomUI(mx,my){
   const sel=selectedEntities();
-  const hq=hqByTeam[localTeam];
-  const selectedHQ=sel.length===1&&hq&&sel[0].id===hq.id;
-  if(!selectedHQ)return false;
+  const building=sel.length===1&&sel[0].kind==="building"&&sel[0].team===localTeam?sel[0]:null;
+  const workers=sel.filter(e=>e.kind==="unit"&&e.team===localTeam&&e.type==="worker");
+  if(!building&&!workers.length)return false;
   const p=bottomPanelRect();
   if(mx<p.x||mx>p.x+p.w||my<p.y||my>p.y+p.h)return false;
   const bx=p.x+18,by=p.y+48,bw=116,bh=42,gap=9;
-  for(let i=0;i<prodButtons.length;i++){
-    const x=bx+i*(bw+gap);
-    if(mx>=x&&mx<=x+bw&&my>=by&&my<=by+bh){
-      sendOrApplyCommand({type:"produce",unitType:prodButtons[i].type});
-      return true;
+  if(building?.complete){
+    const types=BUILDING_TYPES[building.type]?.produces||[];
+    for(let i=0;i<types.length;i++){
+      const x=bx+i*(bw+gap);
+      if(mx>=x&&mx<=x+bw&&my>=by&&my<=by+bh){
+        sendOrApplyCommand({type:"produce",buildingId:building.id,unitType:types[i]});
+        return true;
+      }
+    }
+  }else if(workers.length){
+    for(let i=0;i<buildButtons.length;i++){
+      const x=bx+i*(bw+gap),type=buildButtons[i];
+      if(mx>=x&&mx<=x+bw&&my>=by&&my<=by+bh){
+        if((teamResources[localTeam]||0)>=BUILDING_TYPES[type].cost){
+          buildPlacementMode=type;attackMoveMode=false;
+        }
+        return true;
+      }
     }
   }
   return true;
+}
+function drawBuildPlacement(){
+  if(!buildPlacementMode)return;
+  const s=BUILDING_TYPES[buildPlacementMode],p=worldToScreen(mouse.worldX,mouse.worldY);
+  const valid=canPlaceBuilding(buildPlacementMode,mouse.worldX,mouse.worldY);
+  ctx.save();ctx.translate(p.x,p.y);
+  ctx.fillStyle=valid?"rgba(85,220,130,.28)":"rgba(255,80,80,.28)";
+  ctx.strokeStyle=valid?"#7dffa4":"#ff7777";ctx.lineWidth=2;
+  ctx.fillRect(-s.radius,-s.radius,s.radius*2,s.radius*2);
+  ctx.strokeRect(-s.radius,-s.radius,s.radius*2,s.radius*2);
+  ctx.fillStyle="#fff";ctx.font="bold 11px sans-serif";ctx.textAlign="center";ctx.fillText(s.name,0,4);
+  ctx.restore();
 }
 function drawHUD(){
   ctx.save();
@@ -1556,33 +1809,49 @@ function drawHUD(){
   ctx.strokeStyle="rgba(255,255,255,.14)";ctx.strokeRect(innerWidth/2-159.5,12.5,319,59);
   ctx.fillStyle="#dff6ff";ctx.font="bold 18px sans-serif";ctx.textAlign="center";
   ctx.fillText(`자원 ${Math.floor(teamResources[localTeam]||0)}   ·   인구 ${currentPop(localTeam)} / ${POP_CAP}`,innerWidth/2,35);
-  ctx.font="12px sans-serif";ctx.fillStyle=attackMoveMode?"#f4d35e":"#becad4";
-  ctx.fillText(attackMoveMode?"공격이동 목표를 좌클릭 · Esc 취소":"사령부가 파괴되면 패배",innerWidth/2,57);
+  ctx.font="12px sans-serif";ctx.fillStyle=(attackMoveMode||buildPlacementMode)?"#f4d35e":"#becad4";
+  const modeText=buildPlacementMode?`${BUILDING_TYPES[buildPlacementMode].name} 배치 지점을 좌클릭 · 우클릭/Esc 취소`:
+    attackMoveMode?"공격할 적 또는 이동 지점을 좌클릭 · Esc 취소":"사령부가 파괴되면 패배";
+  ctx.fillText(modeText,innerWidth/2,57);
   if(controlGroupNotice&&performance.now()<controlGroupNoticeUntil){
     ctx.fillStyle="rgba(8,12,15,.86)";ctx.fillRect(innerWidth/2-120,78,240,27);
     ctx.fillStyle="#dff6ff";ctx.font="bold 12px sans-serif";ctx.textAlign="center";
     ctx.fillText(controlGroupNotice,innerWidth/2,96);
   }
 
-  const sel=selectedEntities(),hq=hqByTeam[localTeam];
-  if(sel.length===1&&hq&&sel[0].id===hq.id){
+  const sel=selectedEntities();
+  const selectedBuilding=sel.length===1&&sel[0].kind==="building"&&sel[0].team===localTeam?sel[0]:null;
+  const selectedWorkers=sel.filter(e=>e.kind==="unit"&&e.team===localTeam&&e.type==="worker");
+  if(selectedBuilding||selectedWorkers.length){
     const p=bottomPanelRect();
     ctx.fillStyle="rgba(8,12,15,.90)";ctx.fillRect(p.x,p.y,p.w,p.h);
     ctx.strokeStyle="rgba(255,255,255,.18)";ctx.strokeRect(p.x+.5,p.y+.5,p.w-1,p.h-1);
     ctx.textAlign="left";ctx.fillStyle="#fff";ctx.font="bold 13px sans-serif";
-    ctx.fillText("사령부 생산",p.x+18,p.y+25);
+    const title=selectedBuilding?`${selectedBuilding.name} ${selectedBuilding.complete?"생산":"건설 중"}`:`일꾼 건설 · ${selectedWorkers.length}명`;
+    ctx.fillText(title,p.x+18,p.y+25);
     ctx.font="11px sans-serif";ctx.fillStyle="#a9bac4";
-    ctx.fillText(`대기열 ${hq.queue?.length||0} · 최대 인구 ${POP_CAP}`,p.x+112,p.y+25);
+    if(selectedBuilding)ctx.fillText(`대기열 ${selectedBuilding.queue?.length||0} · 최대 인구 ${POP_CAP}`,p.x+150,p.y+25);
 
     const bx=p.x+18,by=p.y+48,bw=116,bh=42,gap=9;
-    prodButtons.forEach((b,i)=>{
-      const s=UNIT_TYPES[b.type],x=bx+i*(bw+gap);
-      const can=(teamResources[localTeam]||0)>=s.cost && currentPop(localTeam)+queuedPop(localTeam)<POP_CAP;
-      ctx.fillStyle=can?"#273b49":"#25292c";ctx.fillRect(x,by,bw,bh);
-      ctx.strokeStyle="rgba(255,255,255,.15)";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
-      ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(b.label,x+bw/2,by+16);
-      ctx.font="10px sans-serif";ctx.fillText(`${s.cost}자원 · ${s.build.toFixed(1)}초`,x+bw/2,by+32);
-    });
+    if(selectedBuilding?.complete){
+      const types=BUILDING_TYPES[selectedBuilding.type]?.produces||[];
+      types.forEach((type,i)=>{
+        const s=UNIT_TYPES[type],x=bx+i*(bw+gap);
+        const can=(teamResources[localTeam]||0)>=s.cost&&currentPop(localTeam)+queuedPop(localTeam)<POP_CAP;
+        ctx.fillStyle=can?"#273b49":"#25292c";ctx.fillRect(x,by,bw,bh);
+        ctx.strokeStyle="rgba(255,255,255,.15)";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
+        ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(s.name,x+bw/2,by+16);
+        ctx.font="10px sans-serif";ctx.fillText(`${s.cost}자원 · ${s.build.toFixed(1)}초`,x+bw/2,by+32);
+      });
+    }else if(selectedWorkers.length){
+      buildButtons.forEach((type,i)=>{
+        const s=BUILDING_TYPES[type],x=bx+i*(bw+gap),can=(teamResources[localTeam]||0)>=s.cost;
+        ctx.fillStyle=can?"#314334":"#25292c";ctx.fillRect(x,by,bw,bh);
+        ctx.strokeStyle="rgba(255,255,255,.15)";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
+        ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(s.name,x+bw/2,by+16);
+        ctx.font="10px sans-serif";ctx.fillText(`${s.cost}자원 · ${s.build.toFixed(1)}초`,x+bw/2,by+32);
+      });
+    }
   }
 
   // 선택 1개면 특수효과 표시
@@ -1619,14 +1888,18 @@ function drawFloating(){
 }
 function draw(){
   ctx.clearRect(0,0,innerWidth,innerHeight);
+  ctx.save();
+  ctx.scale(camera.zoom,camera.zoom);
   drawTerrain();
   for(const r of resourceNodes)drawResource(r);
   for(const b of buildings)drawBuilding(b);
   for(const u of units)drawUnit(u);
   drawProjectiles();
   drawFog();
-  drawSelectionBox();
+  drawBuildPlacement();
   drawFloating();
+  ctx.restore();
+  drawSelectionBox();
   drawHUD();
 }
 

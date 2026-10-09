@@ -29,11 +29,16 @@
     background:rgba(7,10,13,.80); color:#eaf2f7; font-size:12px;
   }
   #status strong { color:#fff; }
-  #fullscreenBtn {
+  #fullscreenBtn, #resetGuestBtn {
     position:fixed; right:12px; top:82px; z-index:5;
     border:1px solid rgba(255,255,255,.15); border-radius:8px;
     padding:7px 10px; background:rgba(7,10,13,.80); color:white;
     cursor:pointer; font-weight:700;
+  }
+  #resetGuestBtn { top:122px; display:none; background:rgba(74,35,35,.88); }
+  #fullscreenBtn.locked {
+    color:#e9fbff; border-color:#6de4ff; background:rgba(18,77,96,.92);
+    box-shadow:0 0 8px rgba(75,216,255,.95),0 0 20px rgba(75,216,255,.58),inset 0 0 10px rgba(119,232,255,.18);
   }
   #lobby {
     position:fixed; inset:0; z-index:20;
@@ -96,15 +101,18 @@
   Ctrl + 우클릭: 이동 경로 추가<br>
   A → 좌클릭: 공격이동<br>
   S: 선택 유닛 정지<br>
+  P: 전체화면 + 마우스 잠금 켜기/끄기<br>
   1~0: 부대 선택<br>
   Shift + 1~0: 선택 유닛을 부대에 추가<br>
   Ctrl + 1~0: 선택 유닛으로 부대 덮어쓰기<br>
   일꾼으로 아군 자원 우클릭: 채집<br>
-  화면 가장자리: 카메라 이동
+  화면 가장자리: 카메라 이동<br>
+  전체화면: 마우스 잠금 · Esc로 해제
 </div>
 
 <div id="status">네트워크: <strong id="netText">대기</strong><br>진영: <span id="teamText">-</span><br>맵: <span id="mapText">-</span></div>
-<button id="fullscreenBtn">전체화면</button>
+<button id="fullscreenBtn">전체화면 + 마우스 잠금</button>
+<button id="resetGuestBtn">게스트 자리 초기화</button>
 <div id="pauseBanner">호스트 창 비활성화 · 게임 일시정지</div>
 
 <div id="lobby">
@@ -152,6 +160,7 @@ const inviteWrap = document.getElementById("inviteWrap");
 const invite = document.getElementById("invite");
 const copyBtn = document.getElementById("copyBtn");
 const fullscreenBtn = document.getElementById("fullscreenBtn");
+const resetGuestBtn = document.getElementById("resetGuestBtn");
 const netText = document.getElementById("netText");
 const teamText = document.getElementById("teamText");
 const mapText = document.getElementById("mapText");
@@ -164,19 +173,51 @@ const mapFile = document.getElementById("mapFile");
 const CONTROL_GROUP_KEY_CODES=Array.from({length:10},(_,i)=>`Digit${i}`);
 
 document.addEventListener("contextmenu", e => e.preventDefault());
-fullscreenBtn.onclick = async () => {
+async function requestGamePointerLock(){
+  if(!canvas.requestPointerLock)return;
   try {
-    if (!document.fullscreenElement){
-      await document.documentElement.requestFullscreen();
-      if(navigator.keyboard?.lock) await navigator.keyboard.lock(CONTROL_GROUP_KEY_CODES);
-    }else{
-      navigator.keyboard?.unlock?.();
-      await document.exitFullscreen();
-    }
-  } catch (_) {}
-};
+    const result=canvas.requestPointerLock({unadjustedMovement:true});
+    if(result?.catch)await result.catch(()=>canvas.requestPointerLock());
+  } catch (_){
+    try{canvas.requestPointerLock();}catch(__){}
+  }
+}
+async function enterFullscreenAndPointerLock(){
+  if(!document.fullscreenElement)await document.documentElement.requestFullscreen();
+  if(navigator.keyboard?.lock)await navigator.keyboard.lock(CONTROL_GROUP_KEY_CODES);
+  await requestGamePointerLock();
+}
+async function exitFullscreenAndPointerLock(){
+  if(document.pointerLockElement)document.exitPointerLock?.();
+  navigator.keyboard?.unlock?.();
+  if(document.fullscreenElement)await document.exitFullscreen();
+}
+async function toggleFullscreenAndPointerLock(){
+  try{
+    if(document.fullscreenElement&&document.pointerLockElement===canvas)await exitFullscreenAndPointerLock();
+    else await enterFullscreenAndPointerLock();
+  }catch(_){}
+}
+function updateFullscreenButton(){
+  fullscreenBtn.classList.toggle("locked",document.pointerLockElement===canvas);
+  if(!document.fullscreenElement)fullscreenBtn.textContent="전체화면 + 마우스 잠금";
+  else if(document.pointerLockElement===canvas)fullscreenBtn.textContent="마우스 잠김 · Esc 해제";
+  else fullscreenBtn.textContent="마우스 다시 잠금";
+}
+fullscreenBtn.onclick=toggleFullscreenAndPointerLock;
 document.addEventListener("fullscreenchange",()=>{
-  if(!document.fullscreenElement) navigator.keyboard?.unlock?.();
+  if(!document.fullscreenElement){
+    navigator.keyboard?.unlock?.();
+    if(document.pointerLockElement)document.exitPointerLock?.();
+  }
+  updateFullscreenButton();
+});
+document.addEventListener("pointerlockchange",()=>{
+  updateFullscreenButton();
+  if(document.pointerLockElement===canvas){
+    mouse.x=innerWidth/2;mouse.y=innerHeight/2;
+    updateMouseWorldPosition();
+  }
 });
 
 let TILE=64,MAP_W=36,MAP_H=24,WORLD_W=MAP_W*TILE,WORLD_H=MAP_H*TILE;
@@ -526,6 +567,8 @@ let peer=null, conn=null;
 let connected=false;
 let lastSnapshotSent=0;
 let connectionLost=false;
+let guestSessionToken=null;
+const GUEST_TOKEN_PREFIX="miniLinkRTS.guestToken.";
 
 function setPauseNotice(paused,text="호스트 창 비활성화 · 게임 일시정지"){
   gamePaused=paused;
@@ -555,12 +598,40 @@ function makeInvite(peerId){
   u.searchParams.set("join",peerId);
   return u.toString();
 }
+function createGuestSessionToken(){
+  const bytes=new Uint8Array(24);
+  if(globalThis.crypto?.getRandomValues)globalThis.crypto.getRandomValues(bytes);
+  else for(let i=0;i<bytes.length;i++)bytes[i]=Math.floor(Math.random()*256);
+  return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join("");
+}
+function guestTokenKey(hostId){ return GUEST_TOKEN_PREFIX+hostId; }
+function rejectGuestConnection(c,message="이미 참가 중인 게스트가 있습니다."){
+  try{c.send({t:"authRejected",message});}catch(_){}
+  setTimeout(()=>{try{c.close();}catch(_){}},120);
+}
+function acceptGuestConnection(c){
+  const previous=conn;
+  conn=c;connected=true;connectionLost=false;
+  const firstConnection=!started;
+  if(firstConnection)resetWorld();
+  started=true;
+  lobby.classList.add("hidden");
+  netText.textContent="연결됨";
+  setPauseNotice(document.hidden||!document.hasFocus());
+  try{c.send({t:"authAccepted",token:guestSessionToken});}catch(_){}
+  sendHost({t:"hello",team:TEAM_RIGHT,map:exportMapData()});
+  sendHost({t:"pause",paused:gamePaused});
+  sendSnapshot(true);
+  if(firstConnection)centerCameraForTeam(localTeam);
+  if(previous&&previous!==c)try{previous.close();}catch(_){}
+}
 
 function startHost(){
   const chosenMap=availableMaps.find(map=>map.id===selectedMapId)||defaultMap;
   applyMapData(chosenMap);
   setMapSelectionLocked(true);
   role="host"; localTeam=TEAM_LEFT; teamText.textContent="왼쪽 / 호스트";
+  resetGuestBtn.style.display="block";
   hostBtn.disabled=true; soloBtn.disabled=true;
   setLobbyMessage("P2P 방을 만드는 중...");
   netText.textContent="호스트 생성 중";
@@ -573,12 +644,7 @@ function startHost(){
     netText.textContent="게스트 대기";
   });
   peer.on("connection",c=>{
-    // 새로고침한 게스트가 이전 연결의 close 이벤트보다 먼저 들어올 수 있다.
-    // 최신 연결을 채택하고 이전 연결은 닫아 현재 게임 상태를 그대로 이어 준다.
-    const previous=conn;
-    conn=c;
     wireHostConnection(c);
-    if(previous && previous!==c) try{ previous.close(); }catch(_){}
   });
   peer.on("error",err=>{
     setLobbyMessage("P2P 오류: "+err.type);
@@ -586,21 +652,22 @@ function startHost(){
   });
 }
 function wireHostConnection(c){
-  c.on("open",()=>{
-    if(conn!==c){ c.close(); return; }
-    connected=true; connectionLost=false;
-    const firstConnection=!started;
-    if(firstConnection) resetWorld();
-    started=true;
-    lobby.classList.add("hidden");
-    netText.textContent="연결됨";
-    setPauseNotice(document.hidden||!document.hasFocus());
-    sendHost({t:"hello",team:TEAM_RIGHT,map:exportMapData()});
-    sendHost({t:"pause",paused:gamePaused});
-    sendSnapshot(true);
-    if(firstConnection) centerCameraForTeam(localTeam);
+  let authenticated=false;
+  const authTimer=setTimeout(()=>{if(!authenticated)rejectGuestConnection(c,"인증 시간이 만료되었습니다.");},6000);
+  c.on("data",msg=>{
+    if(authenticated){if(conn===c)handleGuestMessage(msg);return;}
+    if(!msg||msg.t!=="auth")return;
+    const supplied=typeof msg.token==="string"?msg.token:"";
+    if(guestSessionToken===null){
+      guestSessionToken=createGuestSessionToken();
+    }else if(!supplied||supplied!==guestSessionToken){
+      clearTimeout(authTimer);
+      rejectGuestConnection(c);
+      return;
+    }
+    authenticated=true;clearTimeout(authTimer);
+    acceptGuestConnection(c);
   });
-  c.on("data",msg=>{ if(conn===c) handleGuestMessage(msg); });
   c.on("close",()=>{
     if(conn!==c) return;
     connected=false; connectionLost=true;
@@ -623,18 +690,36 @@ function startGuest(hostId){
 
   peer=new Peer();
   peer.on("open",()=>{
+    let authenticated=false,rejected=false;
     conn=peer.connect(hostId,{reliable:true,serialization:"json"});
     conn.on("open",()=>{
-      connected=true; connectionLost=false;
-      setLobbyMessage("연결 완료. 호스트 상태를 기다리는 중...");
-      netText.textContent="연결됨";
-      pauseBanner.classList.remove("show");
+      const token=localStorage.getItem(guestTokenKey(hostId))||"";
+      conn.send({t:"auth",token});
+      setLobbyMessage("게스트 자리 인증 중...");
+      netText.textContent="접속 인증 중";
     });
-    conn.on("data",msg=>handleHostMessage(msg));
+    conn.on("data",msg=>{
+      if(msg?.t==="authAccepted"){
+        authenticated=true;connected=true;connectionLost=false;
+        if(typeof msg.token==="string"&&msg.token)localStorage.setItem(guestTokenKey(hostId),msg.token);
+        setLobbyMessage("연결 완료. 호스트 상태를 기다리는 중...");
+        netText.textContent="연결됨";
+        pauseBanner.classList.remove("show");
+        return;
+      }
+      if(msg?.t==="authRejected"){
+        rejected=true;connected=false;
+        const text=msg.message||"다른 게스트가 이미 참가 중입니다.";
+        setLobbyMessage(text);netText.textContent="접속 거부";
+        pauseBanner.textContent=text;pauseBanner.classList.add("show");
+        return;
+      }
+      if(authenticated)handleHostMessage(msg);
+    });
     conn.on("close",()=>{
       connected=false; connectionLost=true;
-      netText.textContent="연결 끊김";
-      pauseBanner.textContent="호스트와 연결이 끊겼습니다";
+      if(!rejected)netText.textContent="연결 끊김";
+      if(!rejected)pauseBanner.textContent="호스트와 연결이 끊겼습니다";
       pauseBanner.classList.add("show");
     });
     conn.on("error",()=>{
@@ -647,6 +732,17 @@ function startGuest(hostId){
     setLobbyMessage("P2P 오류: "+err.type);
   });
 }
+resetGuestBtn.onclick=()=>{
+  if(role!=="host")return;
+  if(!confirm("현재 게스트 연결과 재접속 권한을 초기화할까요?"))return;
+  const previous=conn;
+  conn=null;connected=false;connectionLost=true;guestSessionToken=null;
+  if(previous)try{previous.close();}catch(_){}
+  gamePaused=true;
+  netText.textContent="게스트 대기";
+  pauseBanner.textContent="게스트 자리가 초기화되었습니다 · 새 접속을 기다리는 중";
+  pauseBanner.classList.add("show");
+};
 function sendGuest(obj){
   if(conn && conn.open) try{ conn.send(obj); }catch(_){}
 }
@@ -1282,22 +1378,61 @@ function queueUnit(building,type,team){
   building.queue.push({type,time:s.build,max:s.build});
   return true;
 }
-function spawnNearBuilding(building,type){
-  const dir=building.team===TEAM_LEFT?1:-1;
-  const baseX=building.x+dir*(building.radius+38),s=UNIT_TYPES[type];
-  if(s.layer==="air") return makeUnit(type,building.team,baseX,building.y-building.radius-24);
-  for(let k=0;k<14;k++){
-    const a=k/14*Math.PI*2;
-    const x=baseX+Math.cos(a)*38,y=building.y+Math.sin(a)*58;
-    if(positionClearOfBlockedTerrain(x,y,s.radius)) return makeUnit(type,building.team,x,y);
+function groundSpawnRouteClear(building,x,y,radius){
+  const dx=x-building.x,dy=y-building.y,distance=Math.hypot(dx,dy);
+  if(distance<1)return false;
+  const steps=Math.max(1,Math.ceil(distance/8));
+  let ox=building.x,oy=building.y;
+  for(let i=1;i<=steps;i++){
+    const nx=building.x+dx*i/steps,ny=building.y+dy*i/steps;
+    if(!canStep(ox,oy,nx,ny,radius))return false;
+    ox=nx;oy=ny;
   }
-  return makeUnit(type,building.team,baseX,building.y);
+  return true;
+}
+function groundSpawnPositionClear(building,x,y,s){
+  if(!positionClearOfBlockedTerrain(x,y,s.radius)||!groundSpawnRouteClear(building,x,y,s.radius))return false;
+  for(const b of buildings){
+    if(b.hp>0&&Math.hypot(x-b.x,y-b.y)<s.radius+b.radius+7)return false;
+  }
+  for(const r of resourceNodes){
+    if((typeof r.amount!=="number"||r.amount>0)&&Math.hypot(x-r.x,y-r.y)<s.radius+r.radius+6)return false;
+  }
+  for(const u of units){
+    if(u.hp>0&&unitLayer(u)==="ground"&&Math.hypot(x-u.x,y-u.y)<(s.radius+u.radius)*.8+3)return false;
+  }
+  return true;
+}
+function spawnNearBuilding(building,type){
+  const s=UNIT_TYPES[type],preferred=building.team===TEAM_LEFT?0:Math.PI;
+  const firstRing=building.radius+s.radius+12;
+  if(s.layer==="air"){
+    for(let ring=firstRing;ring<=firstRing+TILE*2;ring+=Math.max(20,TILE/3)){
+      for(let k=0;k<24;k++){
+        const angle=preferred+k/24*Math.PI*2,x=building.x+Math.cos(angle)*ring,y=building.y+Math.sin(angle)*ring;
+        if(x<s.radius||y<s.radius||x>WORLD_W-s.radius||y>WORLD_H-s.radius)continue;
+        if(units.some(u=>u.hp>0&&unitLayer(u)==="air"&&Math.hypot(x-u.x,y-u.y)<(s.radius+u.radius)*.8+3))continue;
+        return makeUnit(type,building.team,x,y);
+      }
+    }
+    return null;
+  }
+  for(let ring=firstRing;ring<=firstRing+TILE*5;ring+=Math.max(18,TILE/3)){
+    for(let k=0;k<32;k++){
+      const angle=preferred+k/32*Math.PI*2,x=building.x+Math.cos(angle)*ring,y=building.y+Math.sin(angle)*ring;
+      if(groundSpawnPositionClear(building,x,y,s))return makeUnit(type,building.team,x,y);
+    }
+  }
+  return null;
 }
 function updateBuildings(dt){
   for(const building of buildings){
     if(!building.complete||building.hp<=0||!building.queue.length) continue;
     const q=building.queue[0];q.time-=dt;
-    if(q.time<=0){spawnNearBuilding(building,q.type);building.queue.shift();}
+    if(q.time<=0){
+      q.time=0;
+      if(spawnNearBuilding(building,q.type))building.queue.shift();
+    }
   }
 }
 function removeDead(){
@@ -1366,7 +1501,7 @@ function updateSoloAI(dt){
    입력 / 선택 / 카메라
 ========================= */
 const camera={x:0,y:0,speed:680,zoom:1,minZoom:1,maxZoom:2.25};
-const mouse={x:0,y:0,worldX:0,worldY:0,down:false,startX:0,startY:0,drag:false};
+const mouse={x:innerWidth/2,y:innerHeight/2,worldX:0,worldY:0,down:false,startX:0,startY:0,drag:false};
 let selectedIds=[];
 let attackMoveMode=false;
 let buildPlacementMode=null;
@@ -1378,7 +1513,10 @@ function resize(){
   canvas.width=Math.floor(innerWidth*dpr);canvas.height=Math.floor(innerHeight*dpr);
   canvas.style.width=innerWidth+"px";canvas.style.height=innerHeight+"px";
   ctx.setTransform(dpr,0,0,dpr,0,0);
+  mouse.x=Math.max(0,Math.min(innerWidth,mouse.x));
+  mouse.y=Math.max(0,Math.min(innerHeight,mouse.y));
   clampCamera();
+  updateMouseWorldPosition();
 }
 addEventListener("resize",resize);resize();
 
@@ -1397,6 +1535,11 @@ function centerCameraForTeam(team){
 }
 function worldToScreen(x,y){return{x:x-camera.x,y:y-camera.y};}
 function screenToWorld(x,y){return{x:x/camera.zoom+camera.x,y:y/camera.zoom+camera.y};}
+function pointerLocked(){return document.pointerLockElement===canvas;}
+function eventScreenPoint(e){return pointerLocked()?{x:mouse.x,y:mouse.y}:{x:e.clientX,y:e.clientY};}
+function updateMouseWorldPosition(){
+  const w=screenToWorld(mouse.x,mouse.y);mouse.worldX=w.x;mouse.worldY=w.y;
+}
 function selectedEntities(){
   const set=new Set(selectedIds);
   return [...units,...buildings].filter(e=>set.has(e.id)&&e.hp>0);
@@ -1459,34 +1602,39 @@ function resourceAtWorld(x,y,team){
 }
 
 canvas.addEventListener("mousemove",e=>{
-  mouse.x=e.clientX;mouse.y=e.clientY;
-  const w=screenToWorld(mouse.x,mouse.y);mouse.worldX=w.x;mouse.worldY=w.y;
+  if(pointerLocked()){
+    mouse.x=Math.max(0,Math.min(innerWidth,mouse.x+(e.movementX||0)));
+    mouse.y=Math.max(0,Math.min(innerHeight,mouse.y+(e.movementY||0)));
+  }else{mouse.x=e.clientX;mouse.y=e.clientY;}
+  updateMouseWorldPosition();
   if(mouse.down&&Math.hypot(mouse.x-mouse.startX,mouse.y-mouse.startY)>5)mouse.drag=true;
 });
 canvas.addEventListener("mousedown",e=>{
   if(!started||gameOver||gamePaused)return;
+  const p=eventScreenPoint(e);
   if(e.button===0){
-    mouse.down=true;mouse.startX=e.clientX;mouse.startY=e.clientY;mouse.drag=false;
+    mouse.down=true;mouse.startX=p.x;mouse.startY=p.y;mouse.drag=false;
   }
 });
 canvas.addEventListener("wheel",e=>{
   if(!started)return;
   e.preventDefault();
-  const anchor=screenToWorld(e.clientX,e.clientY);
+  const p=eventScreenPoint(e),anchor=screenToWorld(p.x,p.y);
   const next=Math.max(camera.minZoom,Math.min(camera.maxZoom,camera.zoom*Math.exp(-e.deltaY*.001)));
   if(Math.abs(next-camera.zoom)<.001)return;
   camera.zoom=next;
-  camera.x=anchor.x-e.clientX/camera.zoom;
-  camera.y=anchor.y-e.clientY/camera.zoom;
+  camera.x=anchor.x-p.x/camera.zoom;
+  camera.y=anchor.y-p.y/camera.zoom;
   clampCamera();
+  updateMouseWorldPosition();
 },{passive:false});
 canvas.addEventListener("mouseup",e=>{
   if(!started||gameOver||gamePaused)return;
-  const w=screenToWorld(e.clientX,e.clientY);
+  const p=eventScreenPoint(e),w=screenToWorld(p.x,p.y);
 
   if(e.button===0&&mouse.down){
     mouse.down=false;
-    if(handleBottomUI(e.clientX,e.clientY)){mouse.drag=false;return;}
+    if(handleBottomUI(p.x,p.y)){mouse.drag=false;return;}
 
     if(buildPlacementMode){
       const ids=selectedEntities().filter(s=>s.kind==="unit"&&s.team===localTeam&&s.type==="worker").map(s=>s.id);
@@ -1503,7 +1651,7 @@ canvas.addEventListener("mouseup",e=>{
     }
 
     if(mouse.drag){
-      const start=screenToWorld(mouse.startX,mouse.startY),end=screenToWorld(e.clientX,e.clientY);
+      const start=screenToWorld(mouse.startX,mouse.startY),end=screenToWorld(p.x,p.y);
       const x1=Math.min(start.x,end.x),y1=Math.min(start.y,end.y);
       const x2=Math.max(start.x,end.x),y2=Math.max(start.y,end.y);
       selectedIds=units.filter(u=>u.team===localTeam&&u.x>=x1&&u.x<=x2&&u.y>=y1&&u.y<=y2).map(u=>u.id);
@@ -1547,6 +1695,11 @@ canvas.addEventListener("mouseup",e=>{
   }
 });
 addEventListener("keydown",e=>{
+  if(e.key.toLowerCase()==="p"&&started&&!e.repeat){
+    e.preventDefault();
+    toggleFullscreenAndPointerLock();
+    return;
+  }
   if(handleControlGroupKey(e)) return;
   if(e.key.toLowerCase()==="a"&&selectedEntities().some(s=>s.kind==="unit"&&s.team===localTeam)){
     attackMoveMode=true;buildPlacementMode=null;
@@ -1570,6 +1723,7 @@ function updateCamera(dt){
   if(mouse.y<=edge)camera.y-=camera.speed*dt;
   if(mouse.y>=innerHeight-edge)camera.y+=camera.speed*dt;
   clampCamera();
+  updateMouseWorldPosition();
 }
 
 /* 호스트 창이 백그라운드면 일시정지 상태를 별도 메시지로 즉시 알린다. */
@@ -1758,6 +1912,14 @@ function drawSelectionBox(){
   ctx.fillStyle="rgba(90,180,255,.10)";ctx.fillRect(x,y,w,h);
   ctx.strokeStyle="rgba(130,210,255,.9)";ctx.strokeRect(x+.5,y+.5,w,h);
 }
+function drawVirtualCursor(){
+  if(!pointerLocked())return;
+  ctx.save();ctx.translate(mouse.x,mouse.y);ctx.scale(1.5,1.5);
+  ctx.shadowColor="#ff8a24";ctx.shadowBlur=8;
+  ctx.fillStyle="#fff";ctx.strokeStyle="#ff9d32";ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(0,19);ctx.lineTo(5,14);ctx.lineTo(9,23);ctx.lineTo(14,21);ctx.lineTo(10,12);ctx.lineTo(17,12);ctx.closePath();
+  ctx.fill();ctx.stroke();ctx.restore();
+}
 
 const buildButtons=["barracks","factory","airport"];
 function bottomPanelRect(){return{x:innerWidth/2-330,y:innerHeight-118,w:660,h:106};}
@@ -1901,6 +2063,7 @@ function draw(){
   ctx.restore();
   drawSelectionBox();
   drawHUD();
+  drawVirtualCursor();
 }
 
 /* =========================

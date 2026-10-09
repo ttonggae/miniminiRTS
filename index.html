@@ -97,8 +97,7 @@
 <div id="help">
   <b>조작</b><br>
   좌클릭 / 드래그: 선택<br>
-  우클릭: 절대이동 · 공격 불가<br>
-  Ctrl + 우클릭: 이동 경로 추가<br>
+  우클릭: 이동 · 대상 명령<br>
   A → 좌클릭: 공격이동<br>
   S: 선택 유닛 정지<br>
   P: 전체화면 + 마우스 잠금 켜기/끄기<br>
@@ -228,11 +227,20 @@ const POP_CAP = 50;
 const RESOURCE_AMOUNT=750;
 const MAX_MINERS_PER_NODE=5;
 const HILL_DAMAGE_MULT = 0.70;
+const NAV_CLEARANCE=12;
+const MIN_NAV_CLEARANCE=4;
+const NAV_PLAN_COUNT_BUDGET=4;
+const NAV_PLAN_TIME_BUDGET_MS=2.5;
+const NAV_CACHE_TTL_MS=400;
+const NAV_FAILED_CACHE_TTL_MS=Infinity;
+const NAV_CACHE_LIMIT=192;
 const MAP_STORAGE_KEY="miniLinkRTS.customMaps.v3";
 let terrain=[];
 let activeMap=null;
 let availableMaps=[];
 let selectedMapId="default";
+let navPlansThisFrame=0,navPlanTimeThisFrame=0,navFrameNow=0,navCacheLastPrune=0;
+const navPathCache=new Map();
 
 function isTerrainBlocked(t){ return t===WALL||t===WATER||t===VOID; }
 
@@ -334,6 +342,7 @@ function applyMapData(map){
   TILE=map.tileSize; MAP_W=map.width; MAP_H=map.height;
   WORLD_W=MAP_W*TILE; WORLD_H=MAP_H*TILE;
   terrain=map.tiles.map(row=>row.slice());
+  clearNavigationCache();
   mapText.textContent=map.name;
 }
 
@@ -409,9 +418,10 @@ function makeUnit(type,team,x,y){
   const u={
     id:nextId++, kind:"unit", type, team, x,y, renderX:x, renderY:y,
     hp:s.hp,maxHp:s.hp,radius:s.radius, orders:[], cooldown:0,
-    carry:0,gatherPhase:"toNode",gatherTargetId:null,gatherTick:0,
-    gatherPath:[],gatherPathIndex:0,gatherPathKey:"",gatherPathFailed:false,gatherPathBlocked:0,
-    shotCount:0,lastFireAt:-999,lastRepairAt:0
+    carry:0,gatherPhase:"toNode",gatherTick:0,
+    navPath:[],navPathIndex:0,navPathKey:"",navPathFailedKey:"",navPathRetry:0,navPathRadius:s.radius,
+    navGoalX:x,navGoalY:y,navGoalProjected:false,
+    shotCount:0,lastFireAt:-999
   };
   units.push(u); return u;
 }
@@ -422,7 +432,7 @@ function makeBuilding(type,team,x,y,complete=true){
     hp:complete?s.hp:1,maxHp:s.hp,radius:s.radius,vision:s.vision,queue:[],complete,
     buildTime:s.build,buildRemaining:complete?0:s.build
   };
-  buildings.push(b); return b;
+  buildings.push(b); clearNavigationCache(); return b;
 }
 function makeHQ(team,x,y){ return makeBuilding("hq",team,x,y,true); }
 function makeResource(team,x,y){
@@ -446,15 +456,16 @@ function findWorkerSpawn(team,index){
       candidates.push({x:home.x+dx*distance+px*side,y:home.y+dy*distance+py*side});
     }
   }
-  for(const p of candidates) if(positionClearOfBlockedTerrain(p.x,p.y,UNIT_TYPES.worker.radius)) return p;
+  for(const p of candidates) if(positionClearForUnit(p.x,p.y,UNIT_TYPES.worker.radius)) return p;
   for(let ring=70;ring<=220;ring+=30) for(let i=0;i<24;i++){
     const angle=i/24*Math.PI*2,p={x:home.x+Math.cos(angle)*ring,y:home.y+Math.sin(angle)*ring};
-    if(positionClearOfBlockedTerrain(p.x,p.y,UNIT_TYPES.worker.radius)) return p;
+    if(positionClearForUnit(p.x,p.y,UNIT_TYPES.worker.radius)) return p;
   }
   return {x:home.x,y:home.y};
 }
 
 function resetWorld(){
+  clearNavigationCache();
   nextId=1; units=[]; buildings=[]; resourceNodes=[]; projectiles=[]; floatingTexts=[];
   teamResources=[50,50]; gameOver=false; winnerTeam=null; gamePaused=false;
 
@@ -896,6 +907,7 @@ function canPlaceBuilding(type,x,y){
   if(tileAtWorld(x,y)===RESOURCE) return false;
   for(const b of buildings) if(b.hp>0&&Math.hypot(x-b.x,y-b.y)<s.radius+b.radius+18) return false;
   for(const r of resourceNodes) if((typeof r.amount!=="number"||r.amount>0)&&Math.hypot(x-r.x,y-r.y)<s.radius+r.radius+16) return false;
+  for(const u of units) if(u.hp>0&&unitLayer(u)==="ground"&&Math.hypot(x-u.x,y-u.y)<s.radius+u.radius+4) return false;
   return true;
 }
 
@@ -906,11 +918,23 @@ function applyCommand(team,cmd){
     const x=Math.max(8,Math.min(WORLD_W-8,Number(cmd.x)||0));
     const y=Math.max(8,Math.min(WORLD_H-8,Number(cmd.y)||0));
     for(const u of us){
-      const order={type:cmd.type,x,y};
-      if(cmd.queue) u.orders.push(order); else u.orders=[order];
+      const current=u.orders[0];
+      const targetShift=current?Math.hypot(current.x-x,current.y-y):Infinity;
+      const nearRepeat=u.orders.length===1&&current?.type===cmd.type&&
+        targetShift<=12;
+      if(nearRepeat){
+        current.x=x;current.y=y;
+        if(targetShift>2){
+          delete current.recoveryX;delete current.recoveryY;current.recoveryElapsed=0;
+          resetMovementOrderProgress(u,current);
+        }
+        continue;
+      }
+      u.orders=[{type:cmd.type,x,y}];
+      invalidateNavPath(u);
     }
   }else if(cmd.type==="stop"){
-    for(const u of unitsForIds(team,cmd.ids)) u.orders=[];
+    for(const u of unitsForIds(team,cmd.ids)){u.orders=[];invalidateNavPath(u);}
   }else if(cmd.type==="gather"){
     const node=getResourceNode(cmd.nodeId);
     if(!node||node.amount<=0) return;
@@ -926,20 +950,20 @@ function applyCommand(team,cmd){
     if(!s||type==="hq"||!builders.length||teamResources[team]<s.cost||!canPlaceBuilding(type,x,y)) return;
     teamResources[team]-=s.cost;
     const building=makeBuilding(type,team,x,y,false);
-    for(const u of builders) u.orders=[{type:"build",targetId:building.id,x,y}];
+    for(const u of builders){u.orders=[{type:"build",targetId:building.id,x,y}];invalidateNavPath(u);}
   }else if(cmd.type==="assistBuild"){
     const building=getEntity(Number(cmd.targetId));
     if(!building||building.kind!=="building"||building.team!==team||building.complete) return;
     for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="worker")){
-      const order={type:"build",targetId:building.id,x:building.x,y:building.y};
-      if(cmd.queue) u.orders.push(order); else u.orders=[order];
+      u.orders=[{type:"build",targetId:building.id,x:building.x,y:building.y}];
+      invalidateNavPath(u);
     }
   }else if(cmd.type==="healTarget"){
     const target=getEntity(Number(cmd.targetId));
     if(!target||target.team!==team||target.kind!=="unit"||unitArmor(target)!=="human") return;
     for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="medic")){
-      const order={type:"healTarget",targetId:target.id,x:target.x,y:target.y};
-      if(cmd.queue) u.orders.push(order); else u.orders=[order];
+      u.orders=[{type:"healTarget",targetId:target.id,x:target.x,y:target.y}];
+      invalidateNavPath(u);
     }
   }else if(cmd.type==="attackTarget"){
     const target=getEntity(Number(cmd.targetId));
@@ -947,8 +971,8 @@ function applyCommand(team,cmd){
     if(target.kind==="unit"&&!pointVisibleTo(team,target.x,target.y)) return;
     if(target.kind==="building"&&target.type!=="hq"&&!pointVisibleTo(team,target.x,target.y)) return;
     for(const u of unitsForIds(team,cmd.ids).filter(u=>canAttackTarget(u,target))){
-      const order={type:"attackTarget",targetId:target.id,x:target.x,y:target.y};
-      if(cmd.queue) u.orders.push(order); else u.orders=[order];
+      u.orders=[{type:"attackTarget",targetId:target.id,x:target.x,y:target.y}];
+      invalidateNavPath(u);
     }
   }else if(cmd.type==="produce"){
     const building=getEntity(Number(cmd.buildingId));
@@ -974,20 +998,62 @@ function circleOverlapsTile(x,y,radius,tx,ty){
   const dx=x-closestX,dy=y-closestY;
   return dx*dx+dy*dy<radius*radius;
 }
+function terrainBoundaryBlocks(centerTerrain,otherTerrain){
+  if(isTerrainBlocked(otherTerrain))return true;
+  const center=movementTerrain(centerTerrain),other=movementTerrain(otherTerrain);
+  if(center===RAMP||other===RAMP)return false;
+  return (center===GROUND&&other===HILL)||(center===HILL&&other===GROUND);
+}
 function positionClearOfBlockedTerrain(x,y,radius){
   if(x-radius<8||y-radius<8||x+radius>=WORLD_W-8||y+radius>=WORLD_H-8) return false;
-  if(isTerrainBlocked(tileAtWorld(x,y))) return false;
+  const centerTerrain=tileAtWorld(x,y);
+  if(isTerrainBlocked(centerTerrain)) return false;
   const minX=Math.max(0,Math.floor((x-radius)/TILE));
   const maxX=Math.min(MAP_W-1,Math.floor((x+radius)/TILE));
   const minY=Math.max(0,Math.floor((y-radius)/TILE));
   const maxY=Math.min(MAP_H-1,Math.floor((y+radius)/TILE));
   for(let ty=minY;ty<=maxY;ty++) for(let tx=minX;tx<=maxX;tx++){
-    if(isTerrainBlocked(terrain[ty][tx])&&circleOverlapsTile(x,y,radius,tx,ty)) return false;
+    if(terrainBoundaryBlocks(centerTerrain,terrain[ty][tx])&&circleOverlapsTile(x,y,radius,tx,ty)) return false;
   }
   return true;
 }
-function canStep(ox,oy,nx,ny,radius){
-  if(!positionClearOfBlockedTerrain(nx,ny,radius)) return false;
+function positionClearOfBuildings(x,y,radius,ignoreBuildingId=null){
+  for(const b of buildings){
+    if(b.hp<=0||b.id===ignoreBuildingId)continue;
+    if(Math.hypot(x-b.x,y-b.y)<radius+b.radius+2)return false;
+  }
+  return true;
+}
+function positionClearForUnit(x,y,radius,ignoreBuildingId=null){
+  return positionClearOfBlockedTerrain(x,y,radius)&&positionClearOfBuildings(x,y,radius,ignoreBuildingId);
+}
+function nearestClearPositionAround(x,y,radius,preferX=x,preferY=y,maxDistance=TILE*4){
+  if(positionClearForUnit(x,y,radius))return{x,y};
+  const base=Math.atan2(preferY-y,preferX-x),step=Math.max(6,Math.min(10,radius*.5));
+  for(let distance=step;distance<=maxDistance;distance+=step){
+    let best=null,bestScore=Infinity;
+    for(let i=0;i<40;i++){
+      const offset=i===0?0:(Math.ceil(i/2)*(i%2?1:-1))*Math.PI/20;
+      const angle=base+offset,px=x+Math.cos(angle)*distance,py=y+Math.sin(angle)*distance;
+      if(!positionClearForUnit(px,py,radius))continue;
+      const score=Math.hypot(px-preferX,py-preferY);
+      if(score<bestScore){best={x:px,y:py};bestScore=score;}
+    }
+    if(best)return best;
+  }
+  return null;
+}
+function recoverStuckUnit(u,preferX,preferY){
+  if(positionClearForUnit(u.x,u.y,u.radius))return true;
+  const escape=nearestClearPositionAround(u.x,u.y,u.radius,preferX,preferY,TILE*4);
+  if(!escape)return false;
+  u.x=escape.x;u.y=escape.y;
+  if(Number.isFinite(u.renderX)){u.renderX=escape.x;u.renderY=escape.y;}
+  invalidateNavPath(u);
+  return true;
+}
+function canStep(ox,oy,nx,ny,radius,ignoreBuildingId=null){
+  if(!positionClearForUnit(nx,ny,radius,ignoreBuildingId)) return false;
   const a=tileAtWorld(ox,oy),b=tileAtWorld(nx,ny);
   return canTraverseTerrain(a,b);
 }
@@ -997,45 +1063,240 @@ function canTraverseTerrain(from,to){
   const a=movementTerrain(from),b=movementTerrain(to);
   return !((a===GROUND&&b===HILL)||(a===HILL&&b===GROUND));
 }
-function findShortestTilePath(startX,startY,targetX,targetY,radius,arrivalRadius=0){
-  const sx=Math.max(0,Math.min(MAP_W-1,Math.floor(startX/TILE)));
-  const sy=Math.max(0,Math.min(MAP_H-1,Math.floor(startY/TILE)));
-  const gx=Math.max(0,Math.min(MAP_W-1,Math.floor(targetX/TILE)));
-  const gy=Math.max(0,Math.min(MAP_H-1,Math.floor(targetY/TILE)));
-  const targetTile=gy*MAP_W+gx;
-  const start=sy*MAP_W+sx,total=MAP_W*MAP_H;
-  const isGoal=index=>{
-    if(index===targetTile) return true;
-    if(arrivalRadius<=0) return false;
-    const tx=index%MAP_W,ty=Math.floor(index/MAP_W);
-    return Math.hypot((tx+.5)*TILE-targetX,(ty+.5)*TILE-targetY)<=arrivalRadius;
+function segmentClearForUnit(ax,ay,bx,by,radius,ignoreBuildingId=null){
+  const dx=bx-ax,dy=by-ay,distance=Math.hypot(dx,dy);
+  if(distance<1)return positionClearForUnit(bx,by,radius,ignoreBuildingId);
+  const steps=Math.max(1,Math.ceil(distance/Math.max(6,radius*.55)));
+  let ox=ax,oy=ay;
+  for(let i=1;i<=steps;i++){
+    const nx=ax+dx*i/steps,ny=ay+dy*i/steps;
+    if(!canStep(ox,oy,nx,ny,radius,ignoreBuildingId))return false;
+    ox=nx;oy=ny;
+  }
+  return true;
+}
+function chooseApproachPoint(u,tx,ty,arrivalRadius,navigationRadius=u.radius){
+  const s=UNIT_TYPES[u.type];
+  if(s.layer==="air"){
+    const angle=Math.atan2(u.y-ty,u.x-tx),distance=Math.max(0,arrivalRadius-2);
+    return{x:tx+Math.cos(angle)*distance,y:ty+Math.sin(angle)*distance};
+  }
+  if(arrivalRadius<=2)return nearestClearPositionAround(tx,ty,navigationRadius,u.x,u.y,TILE*4);
+  const distance=Math.max(0,arrivalRadius-2),base=Math.atan2(u.y-ty,u.x-tx);
+  let best=null,bestScore=Infinity;
+  for(let i=0;i<32;i++){
+    const offset=i===0?0:(Math.ceil(i/2)*(i%2?1:-1))*Math.PI/16;
+    const angle=base+offset,x=tx+Math.cos(angle)*distance,y=ty+Math.sin(angle)*distance;
+    if(!positionClearForUnit(x,y,navigationRadius))continue;
+    const score=Math.hypot(x-u.x,y-u.y);
+    if(score<bestScore){best={x,y};bestScore=score;}
+  }
+  if(!best&&positionClearForUnit(tx,ty,navigationRadius))best={x:tx,y:ty};
+  return best;
+}
+const NAV_DIRECTIONS=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
+const navSearchScratch={total:0,stamp:0,gScore:null,parent:null,seen:null,closed:null,walkableSeen:null,walkable:null,heapIndex:[],heapF:[]};
+function clearNavigationCache(){navPathCache.clear();}
+function beginNavigationFrame(now){
+  navPlansThisFrame=0;navPlanTimeThisFrame=0;navFrameNow=now;
+  if(now-navCacheLastPrune<1000)return;
+  navCacheLastPrune=now;
+  for(const [key,entry] of navPathCache){
+    const ttl=entry.path?NAV_CACHE_TTL_MS:NAV_FAILED_CACHE_TTL_MS;
+    if(now-entry.time>ttl)navPathCache.delete(key);
+  }
+  while(navPathCache.size>NAV_CACHE_LIMIT)navPathCache.delete(navPathCache.keys().next().value);
+}
+function navigationCacheKey(startX,startY,goalX,goalY,radius,startRadius,allowClosest){
+  const cell=Math.max(20,TILE/2);
+  return `${Math.floor(startX/cell)},${Math.floor(startY/cell)}>${Math.round(goalX)},${Math.round(goalY)}:${Math.round(radius)},${Math.round(startRadius)}:${allowClosest?1:0}`;
+}
+function cachedPathCanStart(startX,startY,path,radius,startRadius){
+  if(!path?.length)return false;
+  const checkRadius=positionClearForUnit(startX,startY,radius)?radius:startRadius;
+  return segmentClearForUnit(startX,startY,path[0].x,path[0].y,checkRadius);
+}
+function requestSmoothPath(startX,startY,goalX,goalY,radius,startRadius=radius,allowClosest=false){
+  if(segmentClearForUnit(startX,startY,goalX,goalY,radius))return[{x:goalX,y:goalY}];
+  const now=navFrameNow||performance.now();
+  const cacheKey=navigationCacheKey(startX,startY,goalX,goalY,radius,startRadius,allowClosest);
+  const cached=navPathCache.get(cacheKey);
+  if(cached){
+    const ttl=cached.path?NAV_CACHE_TTL_MS:NAV_FAILED_CACHE_TTL_MS;
+    if(now-cached.time<=ttl){
+      if(cached.path&&cachedPathCanStart(startX,startY,cached.path,radius,startRadius))return cached.path;
+      if(!cached.path&&(cached.shareFailure||Math.hypot(startX-cached.startX,startY-cached.startY)<=4))return null;
+    }else navPathCache.delete(cacheKey);
+  }
+  if(navPlansThisFrame>=NAV_PLAN_COUNT_BUDGET||navPlanTimeThisFrame>=NAV_PLAN_TIME_BUDGET_MS)return undefined;
+  navPlansThisFrame++;
+  const startedAt=performance.now();
+  const path=findSmoothPath(startX,startY,goalX,goalY,radius,startRadius,allowClosest);
+  navPlanTimeThisFrame+=performance.now()-startedAt;
+  navPathCache.set(cacheKey,{
+    time:now,path,startX,startY,
+    shareFailure:!!path||positionClearForUnit(startX,startY,startRadius)
+  });
+  while(navPathCache.size>NAV_CACHE_LIMIT)navPathCache.delete(navPathCache.keys().next().value);
+  return path;
+}
+function prepareNavSearch(total){
+  if(navSearchScratch.total!==total){
+    navSearchScratch.total=total;navSearchScratch.stamp=0;
+    navSearchScratch.gScore=new Float64Array(total);navSearchScratch.parent=new Int32Array(total);
+    navSearchScratch.seen=new Uint32Array(total);navSearchScratch.closed=new Uint32Array(total);
+    navSearchScratch.walkableSeen=new Uint32Array(total);navSearchScratch.walkable=new Uint8Array(total);
+  }
+  navSearchScratch.stamp++;
+  if(navSearchScratch.stamp>=0xffffffff){
+    navSearchScratch.seen.fill(0);navSearchScratch.closed.fill(0);navSearchScratch.walkableSeen.fill(0);navSearchScratch.stamp=1;
+  }
+  return navSearchScratch;
+}
+function findSmoothPath(startX,startY,goalX,goalY,radius,startRadius=radius,allowClosest=false){
+  if(segmentClearForUnit(startX,startY,goalX,goalY,radius))return[{x:goalX,y:goalY}];
+  const step=Math.max(20,TILE/2),cols=Math.ceil(WORLD_W/step),rows=Math.ceil(WORLD_H/step),total=cols*rows;
+  const scratch=prepareNavSearch(total),stamp=scratch.stamp;
+  const {gScore,parent,seen,closed,walkableSeen,walkable,heapIndex,heapF}=scratch;
+  let heapSize=0,poppedF=0;
+  const heuristic=(x,y)=>Math.hypot(goalX-x,goalY-y);
+  const nodeIsClear=(index,x,y)=>{
+    if(walkableSeen[index]!==stamp){walkableSeen[index]=stamp;walkable[index]=positionClearForUnit(x,y,radius)?1:0;}
+    return walkable[index]===1;
   };
-  if(isGoal(start)) return [];
-  const cameFrom=new Int32Array(total); cameFrom.fill(-1); cameFrom[start]=start;
-  const queue=new Int32Array(total); let head=0,tail=0; queue[tail++]=start;
-  const directions=[[1,0],[-1,0],[0,1],[0,-1]];
-  let goal=-1;
-  while(head<tail&&goal===-1){
-    const current=queue[head++],cx=current%MAP_W,cy=Math.floor(current/MAP_W);
-    for(const [dx,dy] of directions){
-      const nx=cx+dx,ny=cy+dy;
-      if(nx<0||ny<0||nx>=MAP_W||ny>=MAP_H) continue;
-      const next=ny*MAP_W+nx;
-      if(cameFrom[next]!==-1||!canTraverseTerrain(terrain[cy][cx],terrain[ny][nx])) continue;
-      const wx=(nx+.5)*TILE,wy=(ny+.5)*TILE;
-      if(!positionClearOfBlockedTerrain(wx,wy,radius)) continue;
-      cameFrom[next]=current; queue[tail++]=next;
-      if(isGoal(next)){goal=next;break;}
+  const push=(index,f)=>{
+    let i=heapSize++;
+    while(i>0){const p=(i-1)>>1;if(heapF[p]<=f)break;heapIndex[i]=heapIndex[p];heapF[i]=heapF[p];i=p;}
+    heapIndex[i]=index;heapF[i]=f;
+  };
+  const pop=()=>{
+    const root=heapIndex[0];poppedF=heapF[0];heapSize--;
+    if(heapSize>0){
+      const lastIndex=heapIndex[heapSize],lastF=heapF[heapSize];let i=0;
+      while(true){let c=i*2+1;if(c>=heapSize)break;if(c+1<heapSize&&heapF[c+1]<heapF[c])c++;if(lastF<=heapF[c])break;heapIndex[i]=heapIndex[c];heapF[i]=heapF[c];i=c;}
+      heapIndex[i]=lastIndex;heapF[i]=lastF;
+    }
+    return root;
+  };
+  const sx=Math.floor(startX/step),sy=Math.floor(startY/step);
+  const seedRadius=positionClearForUnit(startX,startY,radius)?radius:startRadius;
+  for(let oy=-3;oy<=3;oy++)for(let ox=-3;ox<=3;ox++){
+    const gx=sx+ox,gy=sy+oy;if(gx<0||gy<0||gx>=cols||gy>=rows)continue;
+    const index=gy*cols+gx,px=(gx+.5)*step,py=(gy+.5)*step;
+    if(!nodeIsClear(index,px,py)||!segmentClearForUnit(startX,startY,px,py,seedRadius))continue;
+    const cost=Math.hypot(px-startX,py-startY);
+    if(seen[index]!==stamp||cost<gScore[index]){seen[index]=stamp;gScore[index]=cost;parent[index]=-2;push(index,cost+heuristic(px,py));}
+  }
+  let bestGoal=-1,bestCost=Infinity,closestGoal=-1,closestDistance=Math.hypot(goalX-startX,goalY-startY),iterations=0;
+  while(heapSize&&iterations++<total*2){
+    const current=pop();
+    if(closed[current]===stamp)continue;
+    if(poppedF>=bestCost)break;
+    closed[current]=stamp;
+    const cx=current%cols,cy=Math.floor(current/cols),cpX=(cx+.5)*step,cpY=(cy+.5)*step;
+    const distanceToGoal=Math.hypot(goalX-cpX,goalY-cpY);
+    if(distanceToGoal<closestDistance){closestDistance=distanceToGoal;closestGoal=current;}
+    if(segmentClearForUnit(cpX,cpY,goalX,goalY,radius)){
+      const cost=gScore[current]+Math.hypot(goalX-cpX,goalY-cpY);
+      if(cost<bestCost){bestCost=cost;bestGoal=current;}
+    }
+    for(const [dx,dy] of NAV_DIRECTIONS){
+      const nx=cx+dx,ny=cy+dy;if(nx<0||ny<0||nx>=cols||ny>=rows)continue;
+      const next=ny*cols+nx;if(closed[next]===stamp)continue;
+      const npX=(nx+.5)*step,npY=(ny+.5)*step;
+      if(!nodeIsClear(next,npX,npY)||!segmentClearForUnit(cpX,cpY,npX,npY,radius))continue;
+      let fromX=cpX,fromY=cpY,fromCost=gScore[current],newParent=current;
+      const pp=parent[current];
+      if(pp===-2&&segmentClearForUnit(startX,startY,npX,npY,radius)){
+        fromX=startX;fromY=startY;fromCost=0;newParent=-2;
+      }else if(pp>=0){
+        const ax=(pp%cols+.5)*step,ay=(Math.floor(pp/cols)+.5)*step;
+        if(segmentClearForUnit(ax,ay,npX,npY,radius)){
+          fromX=ax;fromY=ay;fromCost=gScore[pp];newParent=pp;
+        }
+      }
+      const tentative=fromCost+Math.hypot(npX-fromX,npY-fromY);
+      if(seen[next]!==stamp||tentative<gScore[next]){
+        seen[next]=stamp;gScore[next]=tentative;parent[next]=newParent;push(next,tentative+heuristic(npX,npY));
+      }
     }
   }
-  if(goal===-1) return null;
-  const path=[];
-  for(let current=goal;current!==start;current=cameFrom[current]){
-    const tx=current%MAP_W,ty=Math.floor(current/MAP_W);
-    path.push({x:(tx+.5)*TILE,y:(ty+.5)*TILE});
+  let projected=false;
+  if(bestGoal<0){
+    if(!allowClosest||closestGoal<0||closestDistance>=Math.hypot(goalX-startX,goalY-startY)-step*.25)return null;
+    bestGoal=closestGoal;projected=true;
   }
-  path.reverse();
-  return path;
+  const reversed=projected?[]:[{x:goalX,y:goalY}];
+  for(let current=bestGoal;current>=0;current=parent[current]){
+    reversed.push({x:(current%cols+.5)*step,y:(Math.floor(current/cols)+.5)*step});
+  }
+  const raw=reversed.reverse(),points=[{x:startX,y:startY},...raw],smooth=[];
+  for(let i=0;i<points.length-1;){
+    let next=points.length-1;
+    while(next>i+1&&!segmentClearForUnit(points[i].x,points[i].y,points[next].x,points[next].y,radius))next--;
+    smooth.push(points[next]);i=next;
+  }
+  if(projected)smooth.projectedGoal=true;
+  return smooth;
+}
+function invalidateNavPath(u){
+  u.navPath=[];u.navPathIndex=0;u.navPathKey="";u.navPathFailedKey="";u.navPathRetry=0;u.navPathRadius=u.radius;
+  u.navGoalX=u.x;u.navGoalY=u.y;u.navGoalProjected=false;
+}
+function movementTerrainRequirementSatisfied(u,requiredTerrain){
+  if(requiredTerrain===null||requiredTerrain===undefined||UNIT_TYPES[u.type].layer==="air")return true;
+  return movementTerrain(tileAtWorld(u.x,u.y))===requiredTerrain;
+}
+function moveUnitAlongPath(u,tx,ty,arrivalRadius,dt,key="move",requiredTerrain=null,allowNearestReachable=false){
+  if(UNIT_TYPES[u.type].layer==="air"){
+    moveToward(u,tx,ty,dt);
+    return Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius;
+  }
+  if(!recoverStuckUnit(u,tx,ty))return false;
+  if(Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius&&movementTerrainRequirementSatisfied(u,requiredTerrain))return true;
+  const pathKey=`${key}:${Math.round(tx/16)},${Math.round(ty/16)}:${Math.round(arrivalRadius)}`;
+  if(u.navPathKey!==pathKey){
+    u.navPathRetry=Math.max(0,(u.navPathRetry||0)-dt);
+    if(u.navPathFailedKey===pathKey&&u.navPathRetry>0)return false;
+    let pathRadius=u.radius+NAV_CLEARANCE;
+    let approach=chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
+    let path=approach&&requestSmoothPath(u.x,u.y,approach.x,approach.y,pathRadius,u.radius);
+    if(path===undefined)return false;
+    if(!path){
+      pathRadius=u.radius+MIN_NAV_CLEARANCE;
+      approach=chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
+      path=approach&&requestSmoothPath(u.x,u.y,approach.x,approach.y,pathRadius,u.radius,allowNearestReachable);
+      if(path===undefined)return false;
+    }
+    if(!path){
+      u.navPath=[];u.navPathIndex=0;u.navPathKey="";
+      u.navPathFailedKey=pathKey;u.navPathRetry=.35;
+      return false;
+    }
+    u.navPathKey=pathKey;u.navPath=path;u.navPathIndex=0;u.navPathFailedKey="";u.navPathRetry=0;u.navPathRadius=pathRadius;
+    const pathGoal=path.projectedGoal?path[path.length-1]:approach;
+    u.navGoalX=pathGoal.x;u.navGoalY=pathGoal.y;
+    u.navGoalProjected=!!path.projectedGoal||Math.hypot(approach.x-tx,approach.y-ty)>arrivalRadius;
+  }
+  while(u.navPathIndex<u.navPath.length){
+    while(u.navPathIndex+1<u.navPath.length){
+      const later=u.navPath[u.navPathIndex+1];
+      if(!segmentClearForUnit(u.x,u.y,later.x,later.y,u.navPathRadius||u.radius))break;
+      u.navPathIndex++;
+    }
+    const waypoint=u.navPath[u.navPathIndex];
+    if(Math.hypot(u.x-waypoint.x,u.y-waypoint.y)<=2){
+      if(!segmentClearForUnit(u.x,u.y,waypoint.x,waypoint.y,u.navPathRadius||u.radius)){invalidateNavPath(u);return false;}
+      u.x=waypoint.x;u.y=waypoint.y;u.navPathIndex++;continue;
+    }
+    moveToward(u,waypoint.x,waypoint.y,dt);
+    return false;
+  }
+  const projectedArrived=u.navGoalProjected&&Math.hypot(u.x-u.navGoalX,u.y-u.navGoalY)<=2;
+  const arrived=projectedArrived||
+    (movementTerrainRequirementSatisfied(u,requiredTerrain)&&Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius);
+  if(!arrived)invalidateNavPath(u);
+  return arrived;
 }
 function hasLineOfSight(ax,ay,bx,by){
   const sourceTerrain=tileAtWorld(ax,ay);
@@ -1066,22 +1327,19 @@ function pointVisibleTo(team,x,y){
 function entityVisibleTo(team,e){ return e.team===team || pointVisibleTo(team,e.x,e.y); }
 function resourceVisibleTo(team,resource){ return resource.team===team || pointVisibleTo(team,resource.x,resource.y); }
 
-function invalidateGatherPath(u){
-  u.gatherPath=[];u.gatherPathIndex=0;u.gatherPathKey="";u.gatherPathFailed=false;u.gatherPathBlocked=0;
-}
 function startGather(u,node){
   if(!node||node.amount<=0) return;
   u.orders=[{type:"gather",targetId:node.id}];
-  u.gatherTargetId=node.id; u.gatherPhase="toNode"; u.gatherTick=0;
-  invalidateGatherPath(u);
+  u.gatherPhase="toNode"; u.gatherTick=0;
+  invalidateNavPath(u);
 }
 function activeMinerCount(nodeId){
   return units.filter(u=>u.hp>0&&u.type==="worker"&&u.gatherPhase==="mining"&&u.orders[0]?.type==="gather"&&u.orders[0].targetId===nodeId).length;
 }
 function finishGatherOrder(u){
   if(u.orders[0]?.type==="gather") u.orders.shift();
-  u.gatherTargetId=null; u.gatherPhase="toNode"; u.gatherTick=0;
-  invalidateGatherPath(u);
+  u.gatherPhase="toNode"; u.gatherTick=0;
+  invalidateNavPath(u);
 }
 function moveToward(u,tx,ty,dt){
   const dx=tx-u.x,dy=ty-u.y,d=Math.hypot(dx,dy);
@@ -1089,44 +1347,8 @@ function moveToward(u,tx,ty,dt){
   const step=Math.min(d,UNIT_TYPES[u.type].speed*dt);
   const nx=u.x+dx/d*step,ny=u.y+dy/d*step;
   if(UNIT_TYPES[u.type].layer==="air"||canStep(u.x,u.y,nx,ny,u.radius)){u.x=nx;u.y=ny;}
-  else return false; // 길찾기 없음
+  else return false;
   return d<=UNIT_TYPES[u.type].speed*dt+2;
-}
-function moveGatherAlongPath(u,tx,ty,arrivalRadius,dt){
-  if(Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius) return true;
-  const goalX=Math.max(0,Math.min(MAP_W-1,Math.floor(tx/TILE)));
-  const goalY=Math.max(0,Math.min(MAP_H-1,Math.floor(ty/TILE)));
-  const pathKey=`${u.gatherPhase}:${goalX},${goalY}`;
-  if(u.gatherPathKey!==pathKey){
-    const path=findShortestTilePath(u.x,u.y,tx,ty,u.radius,arrivalRadius);
-    u.gatherPathKey=pathKey;u.gatherPathIndex=0;u.gatherPathBlocked=0;
-    u.gatherPathFailed=path===null;
-    u.gatherPath=path||[];
-    if(path){
-      const startCenter={x:(Math.floor(u.x/TILE)+.5)*TILE,y:(Math.floor(u.y/TILE)+.5)*TILE};
-      if(Math.hypot(u.x-startCenter.x,u.y-startCenter.y)>3) u.gatherPath.unshift(startCenter);
-    }
-  }
-  if(u.gatherPathFailed) return false;
-  while(u.gatherPathIndex<u.gatherPath.length){
-    const waypoint=u.gatherPath[u.gatherPathIndex];
-    if(Math.hypot(u.x-waypoint.x,u.y-waypoint.y)<=3){u.gatherPathIndex++;continue;}
-    const beforeX=u.x,beforeY=u.y;
-    moveToward(u,waypoint.x,waypoint.y,dt);
-    if(Math.hypot(u.x-beforeX,u.y-beforeY)<.01){
-      u.gatherPathBlocked+=dt;
-      if(u.gatherPathBlocked>.45) invalidateGatherPath(u);
-    }else u.gatherPathBlocked=0;
-    return false;
-  }
-  if(Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius) return true;
-  const beforeX=u.x,beforeY=u.y;
-  moveToward(u,tx,ty,dt);
-  if(Math.hypot(u.x-beforeX,u.y-beforeY)<.01){
-    u.gatherPathBlocked+=dt;
-    if(u.gatherPathBlocked>.45) invalidateGatherPath(u);
-  }else u.gatherPathBlocked=0;
-  return Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius;
 }
 function nearestAttackable(u,maxRange){
   let best=null,bd=Infinity;
@@ -1162,6 +1384,7 @@ function applyDamage(attacker,target,base,label=""){
   if(!target||target.hp<=0) return 0;
   const d=finalDamage(attacker,target,base);
   target.hp-=d;
+  if(target.kind==="building"&&target.hp<=0)clearNavigationCache();
   addDamageText(target,d,label);
   return d;
 }
@@ -1214,10 +1437,10 @@ function updateGather(u,o,dt){
   if(!node||!hq||hq.hp<=0) return;
   if(node.amount<=0&&u.carry<=0){ finishGatherOrder(u); return; }
   if(u.gatherPhase==="toNode"){
-    if(moveGatherAlongPath(u,node.x,node.y,node.radius+12,dt)){
+    if(moveUnitAlongPath(u,node.x,node.y,node.radius+12,dt,`gather:${u.gatherPhase}`)){
       u.gatherPhase=activeMinerCount(node.id)<MAX_MINERS_PER_NODE?"mining":"waiting";
       u.gatherTick=0;
-      invalidateGatherPath(u);
+      invalidateNavPath(u);
     }
   }else if(u.gatherPhase==="waiting"){
     if(node.amount<=0) finishGatherOrder(u);
@@ -1231,15 +1454,16 @@ function updateGather(u,o,dt){
       u.carry+=mined;
       node.amount=Math.max(0,node.amount-mined);
       if(u.carry>=5||node.amount<=0){
-        if(u.carry>0){u.gatherPhase="toHQ";invalidateGatherPath(u);}
+        if(u.carry>0){u.gatherPhase="toHQ";invalidateNavPath(u);}
         else finishGatherOrder(u);
       }
     }
   }else if(u.gatherPhase==="toHQ"){
-    if(moveGatherAlongPath(u,hq.x,hq.y,hq.radius+18,dt)){
+    const dropoffRadius=hq.radius+u.radius+NAV_CLEARANCE+4;
+    if(moveUnitAlongPath(u,hq.x,hq.y,dropoffRadius,dt,`gather:${u.gatherPhase}`)){
       teamResources[u.team]+=u.carry;
       u.carry=0;
-      if(node.amount>0){u.gatherPhase="toNode";invalidateGatherPath(u);}
+      if(node.amount>0){u.gatherPhase="toNode";invalidateNavPath(u);}
       else finishGatherOrder(u);
     }
   }
@@ -1278,10 +1502,12 @@ function updateAttackTarget(u,o,dt,nowSec){
   if(visible){o.x=target.x;o.y=target.y;}
   const tx=visible?target.x:o.x,ty=visible?target.y:o.y;
   const distance=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
-  if(visible&&distance<=UNIT_TYPES[u.type].range&&hasLineOfSight(u.x,u.y,target.x,target.y)){
+  const lineClear=visible&&hasLineOfSight(u.x,u.y,target.x,target.y);
+  if(lineClear&&distance<=UNIT_TYPES[u.type].range){
     fireAt(u,target,nowSec);
-  }else if(moveToward(u,tx,ty,dt)&&!visible){
-    u.orders.shift();
+  }else{
+    const arrival=visible?(lineClear?UNIT_TYPES[u.type].range+target.radius:target.radius+u.radius+4):2;
+    if(moveUnitAlongPath(u,tx,ty,arrival,dt,`attack:${target.id}`)&&!visible)u.orders.shift();
   }
 }
 function updateHealTarget(u,o,dt){
@@ -1293,7 +1519,7 @@ function updateHealTarget(u,o,dt){
   const distance=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
   if(distance<=s.healRange){
     target.hp=Math.min(target.maxHp,target.hp+s.healRate*dt);
-  }else moveToward(u,target.x,target.y,dt);
+  }else moveUnitAlongPath(u,target.x,target.y,s.healRange+target.radius,dt,`heal:${target.id}`);
 }
 function updateBuildOrder(u,o,dt){
   const building=getEntity(o.targetId);
@@ -1305,9 +1531,101 @@ function updateBuildOrder(u,o,dt){
     const progress=1-building.buildRemaining/Math.max(.01,building.buildTime);
     building.hp=Math.max(1,building.maxHp*progress);
     if(building.buildRemaining<=0){building.complete=true;building.hp=building.maxHp;u.orders.shift();}
-  }else moveToward(u,building.x,building.y,dt);
+  }else moveUnitAlongPath(u,building.x,building.y,building.radius+22,dt,`build:${building.id}`);
+}
+function movementOrderRequiredTerrain(o){
+  const targetTerrain=tileAtWorld(o.x,o.y);
+  return isTerrainBlocked(targetTerrain)?null:movementTerrain(targetTerrain);
+}
+function resetMovementOrderProgress(u,o){
+  o.progressX=u.x;o.progressY=u.y;o.progressElapsed=0;o.stalledTime=0;
+}
+function movementOrderStalled(u,o,dt){
+  if(!Number.isFinite(o.progressX)||!Number.isFinite(o.progressY)){
+    resetMovementOrderProgress(u,o);o.progressElapsed=dt;return false;
+  }
+  o.progressElapsed=(o.progressElapsed||0)+dt;
+  if(o.progressElapsed<.06)return false;
+  const moved=Math.hypot(u.x-o.progressX,u.y-o.progressY),sampleTime=o.progressElapsed;
+  if(moved<1)o.stalledTime=(o.stalledTime||0)+sampleTime;
+  else o.stalledTime=Math.max(0,(o.stalledTime||0)-sampleTime*2);
+  o.progressX=u.x;o.progressY=u.y;o.progressElapsed=0;
+  return o.stalledTime>=.24;
+}
+function clearMovementRecovery(u,o){
+  delete o.recoveryX;delete o.recoveryY;o.recoveryElapsed=0;
+  invalidateNavPath(u);resetMovementOrderProgress(u,o);
+}
+function beginMovementRecovery(u,o){
+  recoverStuckUnit(u,o.x,o.y);
+  invalidateNavPath(u);resetMovementOrderProgress(u,o);
+  const goalDx=o.x-u.x,goalDy=o.y-u.y,goalDistance=Math.hypot(goalDx,goalDy)||1;
+  const awayX=-goalDx/goalDistance,awayY=-goalDy/goalDistance;
+  const base=Math.atan2(awayY,awayX);
+  const offsets=[0,Math.PI/12,-Math.PI/12,Math.PI/6,-Math.PI/6,Math.PI/3,-Math.PI/3,Math.PI/2,-Math.PI/2];
+  let best=null,bestScore=Infinity;
+  for(const distance of [Math.max(30,u.radius*2+NAV_CLEARANCE),48,68]){
+    for(const offset of offsets){
+      const x=u.x+Math.cos(base+offset)*distance,y=u.y+Math.sin(base+offset)*distance;
+      if(!positionClearForUnit(x,y,u.radius+MIN_NAV_CLEARANCE)||!segmentClearForUnit(u.x,u.y,x,y,u.radius))continue;
+      const awayProgress=(x-u.x)*awayX+(y-u.y)*awayY;
+      if(awayProgress<=0)continue;
+      let crowdPenalty=0;
+      for(const v of units){
+        if(v===u||v.hp<=0||v.team!==u.team||unitLayer(v)!==unitLayer(u))continue;
+        crowdPenalty+=Math.max(0,u.radius+v.radius+12-Math.hypot(x-v.x,y-v.y))*10;
+      }
+      const lineDeviation=Math.abs((x-u.x)*awayY-(y-u.y)*awayX);
+      const score=lineDeviation*8+crowdPenalty+distance*.1;
+      if(score<bestScore){best={x,y};bestScore=score;}
+    }
+  }
+  if(!best)return false;
+  o.recoveryX=best.x;o.recoveryY=best.y;o.recoveryElapsed=0;
+  return true;
+}
+function movementOrderTarget(u,o,dt){
+  if(!Number.isFinite(o.recoveryX)||!Number.isFinite(o.recoveryY))return{x:o.x,y:o.y,recovering:false};
+  o.recoveryElapsed=(o.recoveryElapsed||0)+dt;
+  if(Math.hypot(u.x-o.recoveryX,u.y-o.recoveryY)<=3||o.recoveryElapsed>=.55){
+    clearMovementRecovery(u,o);
+    return{x:o.x,y:o.y,recovering:false};
+  }
+  return{x:o.recoveryX,y:o.recoveryY,recovering:true};
+}
+function movementGoalGroupKey(team,o){
+  return `${team}:${o.type}:${Math.round(o.x/8)},${Math.round(o.y/8)}`;
+}
+function collectMovementGoalGroups(){
+  const groups=new Map();
+  for(const u of units){
+    if(u.hp<=0)continue;
+    const o=u.orders[0];
+    if(o?.type!=="move"&&o?.type!=="attackMove")continue;
+    const key=movementGoalGroupKey(u.team,o);
+    if(!groups.has(key))groups.set(key,[]);
+    groups.get(key).push(u);
+  }
+  return groups;
+}
+function movementGroupSettled(u,o,groups){
+  const group=groups.get(movementGoalGroupKey(u.team,o));
+  if(!group||group.length<2)return false;
+  const goalX=u.navGoalProjected?u.navGoalX:o.x,goalY=u.navGoalProjected?u.navGoalY:o.y;
+  const layer=unitLayer(u),distance=Math.hypot(u.x-goalX,u.y-goalY);
+  let maxRadius=u.radius;
+  for(const member of group)maxRadius=Math.max(maxRadius,member.radius);
+  const clusterRadius=Math.min(110,Math.max(34,Math.sqrt(group.length)*maxRadius*1.5));
+  if(distance>clusterRadius)return false;
+  const anchor=units.some(v=>v.hp>0&&v.team===u.team&&unitLayer(v)===layer&&
+    Math.hypot(v.x-goalX,v.y-goalY)<=v.radius+5);
+  if(!anchor)return false;
+  return units.some(v=>v!==u&&v.hp>0&&v.team===u.team&&unitLayer(v)===layer&&
+    Math.hypot(v.x-goalX,v.y-goalY)<distance-1&&
+    Math.hypot(v.x-u.x,v.y-u.y)<=u.radius+v.radius+14);
 }
 function updateUnits(dt,nowSec){
+  const movementGroups=collectMovementGoalGroups();
   for(const u of units){
     if(u.hp<=0) continue;
     u.cooldown=Math.max(0,u.cooldown-dt);
@@ -1317,7 +1635,12 @@ function updateUnits(dt,nowSec){
     if(o?.type==="build"&&u.type==="worker"){updateBuildOrder(u,o,dt);continue;}
     if(o?.type==="healTarget"&&u.type==="medic"){updateHealTarget(u,o,dt);continue;}
     if(o?.type==="move"){
-      if(moveToward(u,o.x,o.y,dt)) u.orders.shift();
+      const target=movementOrderTarget(u,o,dt);
+      const arrived=moveUnitAlongPath(u,target.x,target.y,2,dt,target.recovering?"moveRecovery":"move",
+        target.recovering?null:movementOrderRequiredTerrain(o),!target.recovering);
+      if(target.recovering&&arrived){clearMovementRecovery(u,o);continue;}
+      if(arrived||(!target.recovering&&movementGroupSettled(u,o,movementGroups))){u.orders.shift();invalidateNavPath(u);}
+      else if(!target.recovering&&movementOrderStalled(u,o,dt))beginMovementRecovery(u,o);
       continue; // 절대이동 중 공격 불가
     }
     if(o?.type==="attackTarget"){
@@ -1326,8 +1649,15 @@ function updateUnits(dt,nowSec){
     }
     if(o?.type==="attackMove"){
       const t=nearestAttackable(u,UNIT_TYPES[u.type].range);
-      if(t) fireAt(u,t,nowSec);
-      else if(moveToward(u,o.x,o.y,dt)) u.orders.shift();
+      if(t){fireAt(u,t,nowSec);resetMovementOrderProgress(u,o);}
+      else{
+        const target=movementOrderTarget(u,o,dt);
+        const arrived=moveUnitAlongPath(u,target.x,target.y,2,dt,target.recovering?"attackMoveRecovery":"attackMove",
+          target.recovering?null:movementOrderRequiredTerrain(o),!target.recovering);
+        if(target.recovering&&arrived){clearMovementRecovery(u,o);continue;}
+        if(arrived||(!target.recovering&&movementGroupSettled(u,o,movementGroups))){u.orders.shift();invalidateNavPath(u);}
+        else if(!target.recovering&&movementOrderStalled(u,o,dt))beginMovementRecovery(u,o);
+      }
       continue;
     }
     if(!o){
@@ -1385,7 +1715,7 @@ function groundSpawnRouteClear(building,x,y,radius){
   let ox=building.x,oy=building.y;
   for(let i=1;i<=steps;i++){
     const nx=building.x+dx*i/steps,ny=building.y+dy*i/steps;
-    if(!canStep(ox,oy,nx,ny,radius))return false;
+    if(!canStep(ox,oy,nx,ny,radius,building.id))return false;
     ox=nx;oy=ny;
   }
   return true;
@@ -1485,13 +1815,15 @@ function updateSoloAI(dt){
     aiWaveTimer=0;
     const army=units.filter(u=>u.team===1&&u.type!=="worker");
     if(army.length>=3){
+      const wavePoints=[
+        {x:26*TILE,y:12*TILE},
+        {x:18*TILE,y:12*TILE},
+        {x:10*TILE,y:12*TILE},
+        {x:hqByTeam[0].x,y:hqByTeam[0].y}
+      ];
       for(const u of army){
-        u.orders=[
-          {type:"attackMove",x:26*TILE,y:12*TILE},
-          {type:"attackMove",x:18*TILE,y:12*TILE},
-          {type:"attackMove",x:10*TILE,y:12*TILE},
-          {type:"attackMove",x:hqByTeam[0].x,y:hqByTeam[0].y}
-        ];
+        u.orders=wavePoints.map(p=>({type:"attackMove",x:p.x,y:p.y}));
+        invalidateNavPath(u);
       }
     }
   }
@@ -1645,8 +1977,8 @@ canvas.addEventListener("mouseup",e=>{
     if(attackMoveMode){
       const ids=selectedEntities().filter(s=>s.kind==="unit"&&s.team===localTeam).map(s=>s.id);
       const target=enemyEntityAtWorld(w.x,w.y,localTeam);
-      if(ids.length&&target) sendOrApplyCommand({type:"attackTarget",ids,targetId:target.id,queue:false});
-      else if(ids.length) sendOrApplyCommand({type:"attackMove",ids,x:w.x,y:w.y,queue:false});
+      if(ids.length&&target) sendOrApplyCommand({type:"attackTarget",ids,targetId:target.id});
+      else if(ids.length) sendOrApplyCommand({type:"attackMove",ids,x:w.x,y:w.y});
       attackMoveMode=false;mouse.drag=false;return;
     }
 
@@ -1672,18 +2004,18 @@ canvas.addEventListener("mouseup",e=>{
     if(!us.length)return;
     const target=enemyEntityAtWorld(w.x,w.y,localTeam);
     if(target){
-      sendOrApplyCommand({type:"attackTarget",ids:us.map(u=>u.id),targetId:target.id,queue:e.ctrlKey});
+      sendOrApplyCommand({type:"attackTarget",ids:us.map(u=>u.id),targetId:target.id});
       return;
     }
     const ally=entityAtWorld(w.x,w.y,localTeam);
     const workers=us.filter(u=>u.type==="worker");
     if(ally?.kind==="building"&&ally.complete===false&&workers.length){
-      sendOrApplyCommand({type:"assistBuild",ids:workers.map(u=>u.id),targetId:ally.id,queue:e.ctrlKey});
+      sendOrApplyCommand({type:"assistBuild",ids:workers.map(u=>u.id),targetId:ally.id});
       return;
     }
     const medics=us.filter(u=>u.type==="medic");
     if(ally?.kind==="unit"&&ally.hp<ally.maxHp&&unitArmor(ally)==="human"&&medics.length){
-      sendOrApplyCommand({type:"healTarget",ids:medics.map(u=>u.id),targetId:ally.id,queue:e.ctrlKey});
+      sendOrApplyCommand({type:"healTarget",ids:medics.map(u=>u.id),targetId:ally.id});
       return;
     }
     const node=resourceAtWorld(w.x,w.y,localTeam);
@@ -1691,7 +2023,7 @@ canvas.addEventListener("mouseup",e=>{
       sendOrApplyCommand({type:"gather",ids:workers.map(u=>u.id),nodeId:node.id});
       return;
     }
-    sendOrApplyCommand({type:"move",ids:us.map(u=>u.id),x:w.x,y:w.y,queue:e.ctrlKey});
+    sendOrApplyCommand({type:"move",ids:us.map(u=>u.id),x:w.x,y:w.y});
   }
 });
 addEventListener("keydown",e=>{
@@ -2078,6 +2410,7 @@ function loop(now){
   const authoritative = role==="host"||role==="solo";
   if(started&&authoritative&&!gameOver&&!gamePaused){
     const nowSec=now/1000;
+    beginNavigationFrame(now);
     updateUnits(dt,nowSec);
     updateBuildings(dt);
     updateProjectiles(dt);

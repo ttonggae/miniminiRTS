@@ -115,6 +115,9 @@
   우클릭: 이동 · 대상 명령<br>
   A → 좌클릭: 공격이동<br>
   S: 선택 유닛 정지<br>
+  일꾼 Z/X: 건설 분류 · 이후 Z~B: 건물 선택<br>
+  생산건물 Z~B: 유닛 생산<br>
+  Shift: 건설 분류로 돌아가기<br>
   P: 전체화면 + 마우스 잠금 켜기/끄기<br>
   1~0: 부대 선택<br>
   Shift + 1~0: 선택 유닛을 부대에 추가<br>
@@ -261,6 +264,7 @@ const NAV_CACHE_LIMIT=192;
 const NAV_SHARED_FIELD_LIMIT=24;
 const NAV_SHARED_FIELD_IDLE_MS=6000;
 const NAV_SHARED_GOAL_BUCKET=16;
+const NAV_PROJECTED_SEED_WEIGHT=8;
 const MAP_STORAGE_KEY="miniLinkRTS.customMaps.v3";
 let terrain=[];
 let activeMap=null;
@@ -398,9 +402,9 @@ const UNIT_TYPES = {
     special:"범용 보병: 지상과 공중을 모두 공격"
   },
   medic: {
-    name:"메딕", hp:90, speed:82, range:90, damage:2, reload:1.15,
-    vision:340, cost:45, build:5.5, radius:12, armor:"human", layer:"ground", targets:["ground"],healRate:18,healRange:72,
-    special:"의무병: 아군 인간 유닛을 우클릭해 단일 회복"
+    name:"메딕", hp:90, speed:82, range:0, damage:0, reload:1,
+    vision:340, cost:45, build:5.5, radius:12, armor:"human", layer:"ground", targets:[],healRate:18,healRange:72,
+    special:"비전투 의무병: 이동 중에도 범위 내 아군 인간 유닛 한 명을 회복"
   },
   sniper: {
     name:"스나이퍼", hp:68, speed:54, range:285, damage:34, reload:2.35,
@@ -419,21 +423,44 @@ const UNIT_TYPES = {
   },
   heavyTank: {
     name:"중장갑탱크", hp:420, speed:48, range:175, damage:31, reload:1.45,
-    vision:340, cost:110, build:12, radius:20, armor:"heavy", layer:"ground", targets:["ground"],
+    vision:340, cost:110, build:12, radius:20, armor:"heavy", layer:"ground", targets:["ground"],splashRadius:55,splashFactor:.45,
     special:"중장갑: 지상 스플래시 공격, 공중 공격 불가"
+  },
+  artillery: {
+    name:"자주포", hp:165, speed:52, range:430, damage:46, reload:2.7,
+    vision:190, cost:105, build:11, radius:18, armor:"heavy", layer:"ground", targets:["ground"],splashRadius:72,splashFactor:.5,
+    special:"장거리 차량: 넓은 사거리와 스플래시 공격, 좁은 자체 시야와 낮은 체력"
+  },
+  radarVehicle: {
+    name:"레이더차", hp:145, speed:78, range:0, damage:0, reload:1,
+    vision:610, detection:610, unobstructedVision:true, cost:90, build:8, radius:17, armor:"heavy", layer:"ground", targets:[],
+    special:"비전투 탐지 차량: 넓은 시야로 상시 클로킹 유닛 감지"
+  },
+  humvee: {
+    name:"험비", hp:135, speed:126, range:145, damage:6, reload:.34,
+    vision:380, cost:75, build:7, radius:16, armor:"heavy", layer:"ground", targets:["ground"],fireWhileMoving:true,
+    special:"고속 차량: 일반 이동 중에도 빠르게 지상 공격 가능"
   },
   lightAircraft: {
     name:"경비행기", hp:150, speed:145, range:145, damage:8, reload:.7,
     vision:430, cost:85, build:10, radius:16, armor:"air", layer:"air", targets:["ground","air"],
     special:"공중 유닛: 모든 지형을 통과하지만 공격력은 낮음"
+  },
+  stealthFighter: {
+    name:"스텔스기", hp:105, speed:108, range:205, damage:34, reload:1.55,
+    vision:390, cost:145, build:13, radius:16, armor:"air", layer:"air", targets:["ground","air"],cloaked:true,
+    special:"상시 클로킹 전투기: 강한 공격력, 중간 기동성, 낮은 체력"
   }
 };
 
 const BUILDING_TYPES = {
   hq:{name:"사령부",hp:1200,radius:42,vision:320,cost:0,build:0,produces:["worker"]},
   barracks:{name:"병영",hp:650,radius:36,vision:270,cost:120,build:7,produces:["infantry","medic","sniper","antitank","antiair"]},
-  factory:{name:"군수공장",hp:900,radius:42,vision:280,cost:180,build:10,produces:["heavyTank"]},
-  airport:{name:"공항",hp:720,radius:40,vision:300,cost:160,build:9,produces:["lightAircraft"]}
+  factory:{name:"군수공장",hp:900,radius:42,vision:280,cost:180,build:10,produces:["heavyTank","artillery","radarVehicle","humvee"]},
+  airport:{name:"공항",hp:720,radius:40,vision:300,cost:160,build:9,produces:["lightAircraft","stealthFighter"]},
+  groundTurret:{name:"지상포탑",hp:720,radius:30,vision:330,cost:90,build:6,produces:[],range:235,damage:15,reload:.75,targets:["ground"]},
+  radar:{name:"레이더",hp:540,radius:32,vision:650,detection:650,unobstructedVision:true,cost:120,build:7,produces:[]},
+  aaTurret:{name:"공대공 포탑",hp:660,radius:30,vision:460,cost:105,build:6.5,produces:[],range:290,damage:21,reload:.8,targets:["air"]}
 };
 
 let nextId=1;
@@ -447,22 +474,25 @@ let started=false;
 ========================= */
 function makeUnit(type,team,x,y){
   const s=UNIT_TYPES[type];
+  const facing=team===TEAM_LEFT?0:Math.PI;
   const u={
     id:nextId++, kind:"unit", type, team, x,y, renderX:x, renderY:y,
     hp:s.hp,maxHp:s.hp,radius:s.radius, orders:[], cooldown:0,
     carry:0,gatherPhase:"toNode",gatherTick:0,
     navPath:[],navPathIndex:0,navPathKey:"",navPathFailedKey:"",navPathRetry:0,navPathRadius:s.radius,navWaiting:false,
     navGoalX:x,navGoalY:y,navGoalProjected:false,
-    shotCount:0,lastFireAt:-999
+    shotCount:0,lastFireAt:-999,facing,renderFacing:facing,turretFacing:facing,renderTurretFacing:facing
   };
   units.push(u); return u;
 }
 function makeBuilding(type,team,x,y,complete=true){
   const s=BUILDING_TYPES[type];
+  const turretFacing=team===TEAM_LEFT?0:Math.PI;
   const b={
     id:nextId++,kind:"building",type,name:s.name,team,x,y,renderX:x,renderY:y,
     hp:complete?s.hp:1,maxHp:s.hp,radius:s.radius,vision:s.vision,queue:[],complete,
-    buildTime:s.build,buildRemaining:complete?0:s.build
+    buildTime:s.build,buildRemaining:complete?0:s.build,cooldown:0,lastFireAt:-999,
+    turretFacing,renderTurretFacing:turretFacing
   };
   buildings.push(b); clearNavigationCache(); return b;
 }
@@ -856,11 +886,11 @@ function exportState(){
     units:units.filter(u=>u.hp>0).map(u=>({
       id:u.id,type:u.type,team:u.team,x:u.x,y:u.y,hp:u.hp,maxHp:u.maxHp,radius:u.radius,
       orders:u.orders.map(o=>({type:o.type,x:o.x,y:o.y,targetId:o.targetId||null})),
-      carry:u.carry,gatherPhase:u.gatherPhase
+      carry:u.carry,gatherPhase:u.gatherPhase,facing:u.facing,turretFacing:u.turretFacing
     })),
     buildings:buildings.filter(b=>b.hp>0).map(b=>{
       const data={id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision,
-        complete:b.complete,buildTime:b.buildTime,buildRemaining:b.buildRemaining};
+        complete:b.complete,buildTime:b.buildTime,buildRemaining:b.buildRemaining,turretFacing:b.turretFacing};
       if(entityVisibleTo(TEAM_RIGHT,b)){
         data.hp=b.hp;
         data.maxHp=b.maxHp;
@@ -893,11 +923,12 @@ function syncArrayInPlace(current,incoming,kind){
   for(const raw of incoming){
     let e=byId.get(raw.id);
     if(!e){
-      e={...raw,kind,renderX:raw.x,renderY:raw.y};
+      e={...raw,kind,renderX:raw.x,renderY:raw.y,renderFacing:raw.facing,renderTurretFacing:raw.turretFacing};
     }else{
       const rx=e.renderX ?? e.x, ry=e.renderY ?? e.y;
+      const renderFacing=e.renderFacing ?? e.facing,renderTurretFacing=e.renderTurretFacing ?? e.turretFacing;
       Object.assign(e,raw);
-      e.kind=kind; e.renderX=rx; e.renderY=ry;
+      e.kind=kind;e.renderX=rx;e.renderY=ry;e.renderFacing=renderFacing;e.renderTurretFacing=renderTurretFacing;
     }
     next.push(e);
   }
@@ -1039,7 +1070,7 @@ function applyCommand(team,cmd){
   }else if(cmd.type==="attackTarget"){
     const target=getEntity(Number(cmd.targetId));
     if(!target||target.team===team) return;
-    if(target.kind==="unit"&&!pointVisibleTo(team,target.x,target.y)) return;
+    if(target.kind==="unit"&&!entityVisibleTo(team,target)) return;
     if(target.kind==="building"&&target.type!=="hq"&&!pointVisibleTo(team,target.x,target.y)) return;
     for(const u of unitsForIds(team,cmd.ids).filter(u=>canAttackTarget(u,target))){
       u.orders=[{type:"attackTarget",targetId:target.id,x:target.x,y:target.y}];
@@ -1130,6 +1161,7 @@ function recoverStuckUnit(u){
   const escape=nearestClearPositionAround(u.x,u.y,u.radius,
     u.x+direction.x*TILE,u.y+direction.y*TILE,TILE*4);
   if(!escape)return false;
+  if(Math.hypot(escape.x-u.x,escape.y-u.y)>0)u.facing=Math.atan2(escape.y-u.y,escape.x-u.x);
   u.x=escape.x;u.y=escape.y;
   if(Number.isFinite(u.renderX)){u.renderX=escape.x;u.renderY=escape.y;}
   invalidateNavPath(u);
@@ -1153,7 +1185,14 @@ function canTraverseTerrain(from,to){
 function segmentClearOfTerrain(ax,ay,bx,by,radius){
   const dx=bx-ax,dy=by-ay,distance=Math.hypot(dx,dy);
   if(distance<1)return positionClearOfBlockedTerrain(bx,by,radius);
-  const steps=Math.max(1,Math.ceil(distance/Math.max(6,radius*.55)));
+  const fromTerrain=movementTerrain(tileAtWorld(ax,ay)),toTerrain=movementTerrain(tileAtWorld(bx,by));
+  const crossesTerrainLevel=fromTerrain!==toTerrain&&
+    (fromTerrain===GROUND||fromTerrain===HILL||fromTerrain===RAMP)&&
+    (toTerrain===GROUND||toTerrain===HILL||toTerrain===RAMP);
+  const nearTightBoundary=!positionClearOfBlockedTerrain(ax,ay,radius+MIN_NAV_CLEARANCE)||
+    !positionClearOfBlockedTerrain(bx,by,radius+MIN_NAV_CLEARANCE);
+  const sampleStep=(crossesTerrainLevel||nearTightBoundary)?Math.max(3,Math.min(5,radius*.22)):Math.max(6,radius*.55);
+  const steps=Math.max(1,Math.ceil(distance/sampleStep));
   let ox=ax,oy=ay;
   for(let i=1;i<=steps;i++){
     const nx=ax+dx*i/steps,ny=ay+dy*i/steps;
@@ -1290,8 +1329,11 @@ function sharedFieldTerrainMatches(job,x,y){
   return job.requiredTerrain===null||job.requiredTerrain===undefined||
     movementTerrain(tileAtWorld(x,y))===job.requiredTerrain;
 }
+function sharedNavigationGridStep(radius){
+  return radius>=20?Math.max(20,TILE*3/8):Math.max(20,TILE/2);
+}
 function createSharedNavigationJob(goalX,goalY,radius,requiredTerrain,allowClosest){
-  const step=Math.max(20,TILE/2),cols=Math.ceil(WORLD_W/step),rows=Math.ceil(WORLD_H/step),total=cols*rows;
+  const step=sharedNavigationGridStep(radius),cols=Math.ceil(WORLD_W/step),rows=Math.ceil(WORLD_H/step),total=cols*rows;
   const exactGoalClear=sharedFieldTerrainMatches({requiredTerrain},goalX,goalY)&&positionClearForUnit(goalX,goalY,radius);
   const maxSeedDistance=exactGoalClear?Math.max(step*3,TILE*1.25):TILE*4;
   const minGX=Math.max(0,Math.floor((goalX-maxSeedDistance)/step));
@@ -1324,7 +1366,9 @@ function finishSharedNavigationSeeds(job){
   const seeds=job.exactSeeds.map(seed=>({...seed,projected:false}));
   if(job.allowClosest){
     const projectionPenalty=hasExact?job.total*job.step*4:0;
-    for(const seed of job.projectedSeeds)seeds.push({...seed,cost:seed.cost+projectionPenalty,projected:true});
+    for(const seed of job.projectedSeeds)seeds.push({
+      ...seed,cost:seed.cost*NAV_PROJECTED_SEED_WEIGHT+projectionPenalty,projected:true
+    });
   }
   job.exactSeeds=null;job.projectedSeeds=null;
   if(!seeds.length){job.done=true;job.phase="done";return;}
@@ -1603,10 +1647,14 @@ function invalidateNavPath(u){
   u.navGoalX=u.x;u.navGoalY=u.y;u.navGoalProjected=false;u.navWaiting=false;
 }
 function sharedNavigationRadius(radius){
-  if(radius<=17)return 17;
-  if(radius<=25)return 25;
-  if(radius<=32)return 32;
-  return Math.ceil(radius/4)*4;
+  return Math.max(17,Math.ceil(radius));
+}
+function movementCrossesTerrainLevel(u,requiredTerrain){
+  if(requiredTerrain===null||requiredTerrain===undefined)return false;
+  const current=movementTerrain(tileAtWorld(u.x,u.y));
+  return current!==requiredTerrain&&
+    (current===GROUND||current===HILL||current===RAMP)&&
+    (requiredTerrain===GROUND||requiredTerrain===HILL||requiredTerrain===RAMP);
 }
 function movementTerrainRequirementSatisfied(u,requiredTerrain){
   if(requiredTerrain===null||requiredTerrain===undefined||UNIT_TYPES[u.type].layer==="air")return true;
@@ -1624,14 +1672,17 @@ function moveUnitAlongPath(u,tx,ty,arrivalRadius,dt,key="move",requiredTerrain=n
     u.navPathRetry=Math.max(0,(u.navPathRetry||0)-dt);
     if(u.navPathFailedKey===pathKey&&u.navPathRetry>0)return false;
     const useSharedField=key==="move"||key==="attackMove";
-    let pathRadius=useSharedField?sharedNavigationRadius(u.radius+NAV_CLEARANCE):u.radius+NAV_CLEARANCE;
+    const terrainTransition=movementCrossesTerrainLevel(u,requiredTerrain);
+    const primaryClearance=terrainTransition?MIN_NAV_CLEARANCE:NAV_CLEARANCE;
+    let pathRadius=useSharedField?sharedNavigationRadius(u.radius+primaryClearance):u.radius+primaryClearance;
     let approach=useSharedField?{x:tx,y:ty}:chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
     let path=useSharedField?
       requestSharedSmoothPath(u.x,u.y,tx,ty,pathRadius,u.radius,requiredTerrain,allowNearestReachable):
       approach&&requestSmoothPath(u.x,u.y,approach.x,approach.y,pathRadius,u.radius);
     if(path===undefined){u.navWaiting=true;return false;}
-    if(!path){
-      pathRadius=useSharedField?sharedNavigationRadius(u.radius+MIN_NAV_CLEARANCE):u.radius+MIN_NAV_CLEARANCE;
+    if(!path||(terrainTransition&&path.projectedGoal)){
+      const fallbackClearance=primaryClearance===MIN_NAV_CLEARANCE?0:MIN_NAV_CLEARANCE;
+      pathRadius=useSharedField?sharedNavigationRadius(u.radius+fallbackClearance):u.radius+fallbackClearance;
       approach=useSharedField?{x:tx,y:ty}:chooseApproachPoint(u,tx,ty,arrivalRadius,pathRadius);
       path=useSharedField?
         requestSharedSmoothPath(u.x,u.y,tx,ty,pathRadius,u.radius,requiredTerrain,allowNearestReachable):
@@ -1658,6 +1709,7 @@ function moveUnitAlongPath(u,tx,ty,arrivalRadius,dt,key="move",requiredTerrain=n
     const waypoint=u.navPath[u.navPathIndex];
     if(Math.hypot(u.x-waypoint.x,u.y-waypoint.y)<=2){
       if(!segmentClearForUnit(u.x,u.y,waypoint.x,waypoint.y,u.navPathRadius||u.radius)){invalidateNavPath(u);return false;}
+      if(Math.hypot(waypoint.x-u.x,waypoint.y-u.y)>.01)u.facing=Math.atan2(waypoint.y-u.y,waypoint.x-u.x);
       u.x=waypoint.x;u.y=waypoint.y;u.navPathIndex++;continue;
     }
     moveToward(u,waypoint.x,waypoint.y,dt);
@@ -1684,9 +1736,12 @@ function visionSources(team){
   const arr=[];
   for(const u of units) if(u.team===team&&u.hp>0){
     const s=UNIT_TYPES[u.type];
-    arr.push({x:u.x,y:u.y,vision:s.vision,unobstructed:s.layer==="air"});
+    arr.push({x:u.x,y:u.y,vision:s.vision,unobstructed:s.layer==="air"||s.unobstructedVision});
   }
-  for(const b of buildings) if(b.team===team&&b.hp>0&&b.complete!==false) arr.push({x:b.x,y:b.y,vision:b.vision});
+  for(const b of buildings) if(b.team===team&&b.hp>0&&b.complete!==false){
+    const s=BUILDING_TYPES[b.type];
+    arr.push({x:b.x,y:b.y,vision:b.vision,unobstructed:!!s?.unobstructedVision});
+  }
   return arr;
 }
 function pointVisibleTo(team,x,y){
@@ -1695,7 +1750,23 @@ function pointVisibleTo(team,x,y){
   }
   return false;
 }
-function entityVisibleTo(team,e){ return e.team===team || pointVisibleTo(team,e.x,e.y); }
+function pointDetectedTo(team,x,y){
+  for(const u of units){
+    const detection=UNIT_TYPES[u.type]?.detection||0;
+    if(u.team===team&&u.hp>0&&detection>0&&Math.hypot(x-u.x,y-u.y)<=detection)return true;
+  }
+  for(const b of buildings){
+    const detection=BUILDING_TYPES[b.type]?.detection||0;
+    if(b.team===team&&b.hp>0&&b.complete!==false&&detection>0&&Math.hypot(x-b.x,y-b.y)<=detection)return true;
+  }
+  return false;
+}
+function entityVisibleTo(team,e){
+  if(e.team===team)return true;
+  const stats=e.kind==="unit"?UNIT_TYPES[e.type]:BUILDING_TYPES[e.type];
+  if(stats?.cloaked&&!pointDetectedTo(team,e.x,e.y))return false;
+  return pointVisibleTo(team,e.x,e.y);
+}
 function resourceVisibleTo(team,resource){ return resource.team===team || pointVisibleTo(team,resource.x,resource.y); }
 
 function startGather(u,node){
@@ -1715,9 +1786,14 @@ function finishGatherOrder(u){
 function moveToward(u,tx,ty,dt){
   const dx=tx-u.x,dy=ty-u.y,d=Math.hypot(dx,dy);
   if(d<2) return true;
+  const moveFacing=Math.atan2(dy,dx);
   const step=Math.min(d,UNIT_TYPES[u.type].speed*dt);
   const nx=u.x+dx/d*step,ny=u.y+dy/d*step;
-  if(UNIT_TYPES[u.type].layer==="air"||canStep(u.x,u.y,nx,ny,u.radius)){u.x=nx;u.y=ny;}
+  if(UNIT_TYPES[u.type].layer==="air"||canStep(u.x,u.y,nx,ny,u.radius)){
+    u.facing=moveFacing;
+    if(u.type==="humvee"&&!u.aimingThisFrame)u.turretFacing=moveFacing;
+    u.x=nx;u.y=ny;
+  }
   else return false;
   return d<=UNIT_TYPES[u.type].speed*dt+2;
 }
@@ -1726,14 +1802,14 @@ function nearestAttackable(u,maxRange){
   for(const e of [...units,...buildings]){
     if(e.hp<=0||e.team===u.team||!canAttackTarget(u,e)) continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
-    if(d<=maxRange&&d<bd&&hasLineOfSight(u.x,u.y,e.x,e.y)&&pointVisibleTo(u.team,e.x,e.y)){
+    if(d<=maxRange&&d<bd&&hasLineOfSight(u.x,u.y,e.x,e.y)&&entityVisibleTo(u.team,e)){
       best=e;bd=d;
     }
   }
   return best;
 }
 function canAttackTarget(attacker,target){
-  const s=UNIT_TYPES[attacker.type];
+  const s=attacker.kind==="building"?BUILDING_TYPES[attacker.type]:UNIT_TYPES[attacker.type];
   return !!s?.targets?.includes(unitLayer(target));
 }
 function damageTypeMult(attacker,target){
@@ -1760,7 +1836,14 @@ function applyDamage(attacker,target,base,label=""){
   return d;
 }
 function fireAt(u,target,nowSec){
-  const s=UNIT_TYPES[u.type];
+  const s=u.kind==="building"?BUILDING_TYPES[u.type]:UNIT_TYPES[u.type];
+  if(!s||!target)return;
+  const attackFacing=Math.atan2(target.y-u.y,target.x-u.x);
+  if(u.kind==="unit"){
+    u.aimingThisFrame=true;
+    if(u.type==="humvee")u.turretFacing=attackFacing;
+    else u.facing=attackFacing;
+  }else u.turretFacing=attackFacing;
   if(u.cooldown>0) return;
 
   let reload=s.reload;
@@ -1788,11 +1871,12 @@ function updateProjectiles(dt){
     if(d<=st+target.radius){
       applyDamage(attacker,target,p.baseDamage,p.label);
 
-      if(p.fromType==="heavyTank"){
+      const attackStats=attacker.kind==="building"?BUILDING_TYPES[attacker.type]:UNIT_TYPES[attacker.type];
+      if(attackStats?.splashRadius>0){
         for(const e of [...units,...buildings]){
           if(e.hp<=0||e.team===attacker.team||e.id===target.id||unitLayer(e)!=="ground") continue;
-          if(Math.hypot(e.x-target.x,e.y-target.y)<=55+e.radius){
-            applyDamage(attacker,e,p.baseDamage*0.45,"폭발");
+          if(Math.hypot(e.x-target.x,e.y-target.y)<=attackStats.splashRadius+e.radius){
+            applyDamage(attacker,e,p.baseDamage*(attackStats.splashFactor||.45),"폭발");
           }
         }
       }
@@ -1845,7 +1929,7 @@ function autoRepair(u,dt){
   for(const e of [...units,...buildings]){
     if(e.team!==u.team||e.hp<=0||e.hp>=e.maxHp) continue;
     if(e.kind==="building"&&e.complete===false) continue;
-    if(e.kind==="unit"&&e.type!=="heavyTank") continue;
+    if(e.kind==="unit"&&unitArmor(e)!=="heavy") continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
     if(d<bd){best=e;bd=d;}
   }
@@ -1862,6 +1946,12 @@ function nearestHealable(u,maxRange){
   }
   return best;
 }
+function healNearestAlly(u,dt){
+  const s=UNIT_TYPES[u.type],target=nearestHealable(u,s.healRange);
+  if(!target)return null;
+  target.hp=Math.min(target.maxHp,target.hp+s.healRate*dt);
+  return target;
+}
 function workersIgnoreCollisionWhileGathering(a,b){
   return a.type==="worker"&&b.type==="worker"&&
     (a.orders[0]?.type==="gather"||b.orders[0]?.type==="gather");
@@ -1869,7 +1959,7 @@ function workersIgnoreCollisionWhileGathering(a,b){
 function updateAttackTarget(u,o,dt,nowSec){
   const target=getEntity(o.targetId);
   if(!target||target.team===u.team||!canAttackTarget(u,target)){u.orders.shift();return;}
-  const visible=pointVisibleTo(u.team,target.x,target.y);
+  const visible=entityVisibleTo(u.team,target);
   if(visible){o.x=target.x;o.y=target.y;}
   const tx=visible?target.x:o.x,ty=visible?target.y:o.y;
   const distance=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
@@ -2033,20 +2123,26 @@ function updateUnits(dt,nowSec){
   const movementGroups=collectMovementGoalGroups();
   for(const u of units){
     if(u.hp<=0) continue;
+    u.aimingThisFrame=false;
     u.cooldown=Math.max(0,u.cooldown-dt);
     const o=u.orders[0];
+    if(u.type==="medic"&&o?.type!=="healTarget")healNearestAlly(u,dt);
 
     if(o?.type==="gather"&&u.type==="worker"){ updateGather(u,o,dt); continue; }
     if(o?.type==="build"&&u.type==="worker"){updateBuildOrder(u,o,dt);continue;}
     if(o?.type==="healTarget"&&u.type==="medic"){updateHealTarget(u,o,dt);continue;}
     if(o?.type==="move"){
+      if(UNIT_TYPES[u.type].fireWhileMoving){
+        const target=nearestAttackable(u,UNIT_TYPES[u.type].range);
+        if(target)fireAt(u,target,nowSec);
+      }
       const target=movementOrderTarget(u,o,dt);
       const arrived=moveUnitAlongPath(u,target.x,target.y,2,dt,target.recovering?"moveRecovery":"move",
         target.recovering?null:movementOrderRequiredTerrain(o),!target.recovering);
       if(target.recovering&&arrived){clearMovementRecovery(u,o);continue;}
       if(arrived||(!target.recovering&&movementGroupSettled(u,o,movementGroups))){u.orders.shift();invalidateNavPath(u);}
       else if(!target.recovering&&movementOrderStalled(u,o,dt))beginMovementRecovery(u,o);
-      continue; // 절대이동 중 공격 불가
+      continue;
     }
     if(o?.type==="attackTarget"){
       updateAttackTarget(u,o,dt,nowSec);
@@ -2055,7 +2151,7 @@ function updateUnits(dt,nowSec){
     if(o?.type==="attackMove"){
       const t=nearestAttackable(u,UNIT_TYPES[u.type].range);
       if(t){fireAt(u,t,nowSec);resetMovementOrderProgress(u,o);}
-      else{
+      if(!t||UNIT_TYPES[u.type].fireWhileMoving){
         const target=movementOrderTarget(u,o,dt);
         const arrived=moveUnitAlongPath(u,target.x,target.y,2,dt,target.recovering?"attackMoveRecovery":"attackMove",
           target.recovering?null:movementOrderRequiredTerrain(o),!target.recovering);
@@ -2067,15 +2163,7 @@ function updateUnits(dt,nowSec){
     }
     if(!o){
       if(u.type==="worker") autoRepair(u,dt);
-      else if(u.type==="medic"){
-        const heal=nearestHealable(u,UNIT_TYPES.medic.healRange);
-        if(heal) heal.hp=Math.min(heal.maxHp,heal.hp+UNIT_TYPES.medic.healRate*dt);
-        else{
-          const t=nearestAttackable(u,UNIT_TYPES[u.type].range);
-          if(t) fireAt(u,t,nowSec);
-        }
-      }
-      else{
+      else if(u.type!=="medic"){
         const t=nearestAttackable(u,UNIT_TYPES[u.type].range);
         if(t) fireAt(u,t,nowSec);
       }
@@ -2165,9 +2253,16 @@ function spawnNearBuilding(building,type){
   }
   return null;
 }
-function updateBuildings(dt){
+function updateBuildings(dt,nowSec){
   for(const building of buildings){
-    if(!building.complete||building.hp<=0||!building.queue.length) continue;
+    building.cooldown=Math.max(0,(building.cooldown||0)-dt);
+    if(!building.complete||building.hp<=0) continue;
+    const stats=BUILDING_TYPES[building.type];
+    if(stats?.targets?.length){
+      const target=nearestAttackable(building,stats.range);
+      if(target)fireAt(building,target,nowSec);
+    }
+    if(!building.queue.length) continue;
     const q=building.queue[0];
     if(instantBuildFor(building.team))q.time=0;
     else q.time-=dt;
@@ -2444,7 +2539,16 @@ addEventListener("keydown",e=>{
     toggleFullscreenAndPointerLock();
     return;
   }
+  if(e.key==="Shift"&&started&&!e.repeat&&activeBuildCategory){
+    const hasSelectedWorker=selectedEntities().some(entity=>entity.kind==="unit"&&entity.team===localTeam&&entity.type==="worker");
+    if(hasSelectedWorker){
+      e.preventDefault();
+      activeBuildCategory=null;buildPlacementMode=null;attackMoveMode=false;
+      return;
+    }
+  }
   if(handleControlGroupKey(e)) return;
+  if(handleActionHotkey(e)) return;
   if(e.key.toLowerCase()==="a"&&selectedEntities().some(s=>s.kind==="unit"&&s.team===localTeam)){
     attackMoveMode=true;buildPlacementMode=null;
   }
@@ -2456,7 +2560,6 @@ addEventListener("keydown",e=>{
       sendOrApplyCommand({type:"stop",ids});
     }
   }
-  if(e.key==="Escape"){attackMoveMode=false;buildPlacementMode=null;}
 });
 
 function updateCamera(dt){
@@ -2513,12 +2616,25 @@ function drawTerrain(){
     }
   }
 }
+function angleDelta(from,to){
+  return Math.atan2(Math.sin(to-from),Math.cos(to-from));
+}
+function lerpAngle(from,to,k){return from+angleDelta(from,to)*k;}
 function lerpRenderEntities(dt){
-  if(role!=="guest")return;
-  const k=1-Math.pow(.001,dt);
+  const positionK=1-Math.pow(.001,dt),rotationK=1-Math.pow(.00002,dt);
   for(const e of [...units,...buildings]){
-    e.renderX+=(e.x-e.renderX)*k;
-    e.renderY+=(e.y-e.renderY)*k;
+    if(role==="guest"){
+      e.renderX+=(e.x-e.renderX)*positionK;
+      e.renderY+=(e.y-e.renderY)*positionK;
+    }
+    if(Number.isFinite(e.facing)){
+      if(!Number.isFinite(e.renderFacing))e.renderFacing=e.facing;
+      e.renderFacing=lerpAngle(e.renderFacing,e.facing,rotationK);
+    }
+    if(Number.isFinite(e.turretFacing)){
+      if(!Number.isFinite(e.renderTurretFacing))e.renderTurretFacing=e.turretFacing;
+      e.renderTurretFacing=lerpAngle(e.renderTurretFacing,e.turretFacing,rotationK);
+    }
   }
 }
 function displayPos(e){
@@ -2555,13 +2671,28 @@ function drawBuilding(b){
   const p=displayPos(b),s=worldToScreen(p.x,p.y),sel=selectedIds.includes(b.id);
   ctx.save();ctx.translate(s.x,s.y);ctx.globalAlpha=visible?1:.48;
   const r=b.radius||36;
-  const accent=b.type==="barracks"?"#6d8f58":b.type==="factory"?"#667483":b.type==="airport"?"#6d67a0":"#4b8ddb";
+  const accent=b.type==="barracks"?"#6d8f58":b.type==="factory"?"#667483":b.type==="airport"?"#6d67a0":
+    b.type==="groundTurret"?"#7d6848":b.type==="radar"?"#397f82":b.type==="aaTurret"?"#735d83":"#4b8ddb";
   ctx.fillStyle=b.team===localTeam?accent:"#b95050";
   ctx.fillRect(-r,-r,r*2,r*2);
   ctx.fillStyle="rgba(255,255,255,.18)";ctx.fillRect(-r+8,-r+8,r*2-16,Math.max(10,r*.38));
   if(b.type==="airport"){
     ctx.strokeStyle="rgba(255,255,255,.55)";ctx.lineWidth=4;
     ctx.beginPath();ctx.moveTo(-r+10,0);ctx.lineTo(r-10,0);ctx.moveTo(0,-r+10);ctx.lineTo(0,r-10);ctx.stroke();
+  }else if(b.type==="groundTurret"){
+    ctx.fillStyle="rgba(15,20,22,.62)";ctx.beginPath();ctx.arc(0,0,r*.5,0,Math.PI*2);ctx.fill();
+    ctx.save();ctx.rotate(b.renderTurretFacing??b.turretFacing??0);
+    ctx.strokeStyle="rgba(255,255,255,.65)";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(r*.82,0);ctx.stroke();ctx.restore();
+  }else if(b.type==="radar"){
+    ctx.strokeStyle="rgba(180,255,255,.75)";ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(0,2,r*.48,Math.PI*1.15,Math.PI*1.85);ctx.stroke();
+    ctx.beginPath();ctx.arc(0,2,r*.75,Math.PI*1.15,Math.PI*1.85);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(0,2);ctx.lineTo(0,r*.72);ctx.stroke();
+  }else if(b.type==="aaTurret"){
+    ctx.fillStyle="rgba(15,20,22,.62)";ctx.beginPath();ctx.arc(0,0,r*.48,0,Math.PI*2);ctx.fill();
+    ctx.save();ctx.rotate(b.renderTurretFacing??b.turretFacing??0);
+    ctx.strokeStyle="rgba(255,255,255,.68)";ctx.lineWidth=3;
+    ctx.beginPath();ctx.moveTo(0,-6);ctx.lineTo(r*.82,-8);ctx.moveTo(0,6);ctx.lineTo(r*.82,8);ctx.stroke();ctx.restore();
   }
   ctx.strokeStyle=sel?"#fff":"rgba(0,0,0,.45)";ctx.lineWidth=sel?3:2;ctx.strokeRect(-r-2,-r-2,r*2+4,r*2+4);
   ctx.fillStyle="#fff";ctx.font="bold 12px sans-serif";ctx.textAlign="center";
@@ -2586,36 +2717,69 @@ function unitColor(u){
   if(u.type==="antitank")return u.team===localTeam?"#d0a85e":"#d47a58";
   if(u.type==="antiair")return u.team===localTeam?"#65d6d0":"#e89662";
   if(u.type==="heavyTank")return u.team===localTeam?"#5f8fb7":"#b75f5f";
+  if(u.type==="artillery")return u.team===localTeam?"#718ca5":"#ad695f";
+  if(u.type==="radarVehicle")return u.team===localTeam?"#55b8b4":"#ca7771";
+  if(u.type==="humvee")return u.team===localTeam?"#d1aa57":"#c96b55";
   if(u.type==="lightAircraft")return u.team===localTeam?"#a7d8e8":"#e8a7a7";
+  if(u.type==="stealthFighter")return u.team===localTeam?"#7183a8":"#a27088";
   return u.team===localTeam?"#78b8ff":"#ff7777";
 }
 function drawUnit(u){
   if(u.hp<=0||!entityVisibleTo(localTeam,u))return;
   const p=displayPos(u),s=worldToScreen(p.x,p.y),sel=selectedIds.includes(u.id);
-  ctx.save();ctx.translate(s.x,s.y);ctx.fillStyle=unitColor(u);
-  ctx.strokeStyle=sel?"#fff":"rgba(0,0,0,.55)";ctx.lineWidth=sel?3:2;
+  ctx.save();ctx.translate(s.x,s.y);
+  if(UNIT_TYPES[u.type].cloaked&&u.team===localTeam)ctx.globalAlpha=.7;
+  const bodyFacing=Number.isFinite(u.renderFacing)?u.renderFacing:(Number.isFinite(u.facing)?u.facing:(u.team===TEAM_LEFT?0:Math.PI));
+  const turretFacing=Number.isFinite(u.renderTurretFacing)?u.renderTurretFacing:(Number.isFinite(u.turretFacing)?u.turretFacing:bodyFacing);
+  const bodyColor=unitColor(u),outline=sel?"#fff":"rgba(0,0,0,.55)";
+  ctx.save();ctx.rotate(bodyFacing);ctx.fillStyle=bodyColor;ctx.strokeStyle=outline;ctx.lineWidth=sel?3:2;
   if(u.type==="heavyTank"){
-    ctx.fillRect(-18,-14,36,28);ctx.strokeRect(-18,-14,36,28);
-    ctx.fillStyle="rgba(20,20,20,.5)";ctx.fillRect(-4,-20,8,17);
-  }else if(u.type==="lightAircraft"){
-    ctx.beginPath();ctx.moveTo(0,-20);ctx.lineTo(7,-4);ctx.lineTo(22,8);ctx.lineTo(6,6);ctx.lineTo(0,18);ctx.lineTo(-6,6);ctx.lineTo(-22,8);ctx.lineTo(-7,-4);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.fillRect(-18,-13,36,26);ctx.strokeRect(-18,-13,36,26);
+    ctx.fillStyle="rgba(20,20,20,.42)";ctx.fillRect(-16,-17,31,5);ctx.fillRect(-16,12,31,5);
+    ctx.beginPath();ctx.arc(2,0,8,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle="#20272c";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(4,0);ctx.lineTo(27,0);ctx.stroke();
+  }else if(u.type==="artillery"){
+    ctx.fillRect(-17,-12,34,24);ctx.strokeRect(-17,-12,34,24);
+    ctx.fillStyle="rgba(20,20,20,.42)";ctx.fillRect(-15,-16,28,4);ctx.fillRect(-15,12,28,4);
+    ctx.beginPath();ctx.arc(0,0,7,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle="#20272c";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(2,0);ctx.lineTo(32,0);ctx.stroke();
+  }else if(u.type==="radarVehicle"){
+    ctx.beginPath();ctx.moveTo(18,0);ctx.lineTo(11,11);ctx.lineTo(-16,11);ctx.lineTo(-16,-11);ctx.lineTo(11,-11);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.strokeStyle="#d8ffff";ctx.lineWidth=2;ctx.beginPath();ctx.arc(-1,0,11,-Math.PI/2,Math.PI/2);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(-1,0);ctx.lineTo(-12,0);ctx.stroke();
+  }else if(u.type==="humvee"){
+    ctx.beginPath();ctx.moveTo(18,0);ctx.lineTo(12,10);ctx.lineTo(-15,10);ctx.lineTo(-18,6);ctx.lineTo(-18,-6);ctx.lineTo(-15,-10);ctx.lineTo(12,-10);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.fillStyle="rgba(20,20,20,.48)";ctx.fillRect(-12,-14,8,4);ctx.fillRect(7,-14,8,4);ctx.fillRect(-12,10,8,4);ctx.fillRect(7,10,8,4);
+  }else if(u.type==="lightAircraft"||u.type==="stealthFighter"){
+    ctx.beginPath();ctx.moveTo(23,0);ctx.lineTo(6,7);ctx.lineTo(-8,21);ctx.lineTo(-6,6);ctx.lineTo(-21,3);ctx.lineTo(-21,-3);ctx.lineTo(-6,-6);ctx.lineTo(-8,-21);ctx.lineTo(6,-7);ctx.closePath();ctx.fill();ctx.stroke();
+    if(u.type==="stealthFighter"){
+      ctx.strokeStyle="rgba(150,235,255,.8)";ctx.setLineDash([4,3]);ctx.beginPath();ctx.arc(0,0,24,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+    }
   }else if(u.type==="sniper"){
-    ctx.beginPath();ctx.moveTo(0,-14);ctx.lineTo(13,11);ctx.lineTo(-13,11);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.strokeStyle="#111";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,-3);ctx.lineTo(18,-10);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(15,0);ctx.lineTo(-11,11);ctx.lineTo(-11,-11);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.strokeStyle="#111";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,-3);ctx.lineTo(22,-3);ctx.stroke();
   }else if(u.type==="medic"){
     ctx.beginPath();ctx.arc(0,0,14,0,Math.PI*2);ctx.fill();ctx.stroke();
     ctx.fillStyle="#fff";ctx.fillRect(-3,-9,6,18);ctx.fillRect(-9,-3,18,6);
+    ctx.fillStyle="#244";ctx.beginPath();ctx.moveTo(17,0);ctx.lineTo(10,-5);ctx.lineTo(10,5);ctx.closePath();ctx.fill();
   }else if(u.type==="antitank"){
     ctx.fillRect(-13,-12,26,24);ctx.strokeRect(-13,-12,26,24);
-    ctx.strokeStyle="#222";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(-7,-4);ctx.lineTo(18,-15);ctx.stroke();
+    ctx.strokeStyle="#222";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(-3,0);ctx.lineTo(23,0);ctx.stroke();
   }else if(u.type==="antiair"){
-    ctx.beginPath();ctx.moveTo(0,-15);ctx.lineTo(15,0);ctx.lineTo(0,15);ctx.lineTo(-15,0);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.strokeStyle="#222";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-5,-4);ctx.lineTo(-10,-17);ctx.moveTo(5,-4);ctx.lineTo(10,-17);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(15,0);ctx.lineTo(0,15);ctx.lineTo(-15,0);ctx.lineTo(0,-15);ctx.closePath();ctx.fill();ctx.stroke();
+    ctx.strokeStyle="#222";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,-5);ctx.lineTo(20,-9);ctx.moveTo(0,5);ctx.lineTo(20,9);ctx.stroke();
   }else if(u.type==="worker"){
     ctx.fillRect(-11,-11,22,22);ctx.strokeRect(-11,-11,22,22);
-    ctx.strokeStyle="#222";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(-15,-14);ctx.lineTo(14,14);ctx.stroke();
+    ctx.fillStyle="rgba(30,40,45,.55)";ctx.beginPath();ctx.moveTo(17,0);ctx.lineTo(10,-9);ctx.lineTo(10,9);ctx.closePath();ctx.fill();
+    ctx.strokeStyle="#222";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(-9,-8);ctx.lineTo(8,9);ctx.stroke();
   }else{
-    ctx.fillRect(-12,-12,24,24);ctx.strokeRect(-12,-12,24,24);
+    ctx.beginPath();ctx.arc(0,0,13,0,Math.PI*2);ctx.fill();ctx.stroke();
+    ctx.strokeStyle="#20272c";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(2,0);ctx.lineTo(20,0);ctx.stroke();
+  }
+  ctx.restore();
+  if(u.type==="humvee"){
+    ctx.save();ctx.rotate(turretFacing);ctx.fillStyle="#273238";ctx.beginPath();ctx.arc(0,0,6,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle="#182025";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(3,0);ctx.lineTo(20,0);ctx.stroke();ctx.restore();
   }
   ctx.fillStyle="#fff";ctx.font="10px sans-serif";ctx.textAlign="center";ctx.fillText(UNIT_TYPES[u.type].name,0,u.radius+16);
   if(u.type==="worker"&&u.carry>0){ctx.fillStyle="#9ee7ff";ctx.font="bold 9px sans-serif";ctx.fillText(u.carry.toFixed(1),0,-u.radius-18);}
@@ -2665,13 +2829,62 @@ function drawVirtualCursor(){
   ctx.fill();ctx.stroke();ctx.restore();
 }
 
-const buildButtons=["barracks","factory","airport"];
-function bottomPanelRect(){return{x:innerWidth/2-330,y:innerHeight-118,w:660,h:106};}
+const ACTION_HOTKEYS=["Z","X","C","V","B"];
+const buildCategories=[
+  {key:"production",name:"생산건물",types:["barracks","factory","airport"]},
+  {key:"defense",name:"방어건물",types:["groundTurret","radar","aaTurret"]}
+];
+let activeBuildCategory=null;
+let buildMenuSelectionKey="";
+function currentBuildButtons(){return buildCategories.find(c=>c.key===activeBuildCategory)?.types||[];}
+function syncWorkerBuildMenu(workers){
+  const key=workers.map(worker=>worker.id).sort((a,b)=>a-b).join(",");
+  if(key===buildMenuSelectionKey)return;
+  buildMenuSelectionKey=key;activeBuildCategory=null;buildPlacementMode=null;
+}
+function bottomPanelRect(){
+  return{x:innerWidth/2-330,y:innerHeight-118,w:660,h:106};
+}
+function activateActionSlot(index){
+  if(!started||gameOver||gamePaused||index<0||index>=ACTION_HOTKEYS.length)return false;
+  const sel=selectedEntities();
+  const building=sel.length===1&&sel[0].kind==="building"&&sel[0].team===localTeam?sel[0]:null;
+  if(building?.complete){
+    syncWorkerBuildMenu([]);
+    const type=(BUILDING_TYPES[building.type]?.produces||[])[index];
+    if(!type)return false;
+    sendOrApplyCommand({type:"produce",buildingId:building.id,unitType:type});
+    return true;
+  }
+  const workers=sel.filter(e=>e.kind==="unit"&&e.team===localTeam&&e.type==="worker");
+  if(!workers.length)return false;
+  syncWorkerBuildMenu(workers);
+  if(!activeBuildCategory){
+    const category=buildCategories[index];
+    if(!category)return false;
+    activeBuildCategory=category.key;buildPlacementMode=null;attackMoveMode=false;
+    return true;
+  }
+  const type=currentBuildButtons()[index];
+  if(!type)return false;
+  if(hasResources(localTeam,BUILDING_TYPES[type].cost)){
+    buildPlacementMode=type;attackMoveMode=false;
+  }
+  return true;
+}
+function handleActionHotkey(e){
+  if(e.ctrlKey||e.altKey||e.metaKey||e.repeat)return false;
+  const index=ACTION_HOTKEYS.findIndex(k=>k.toLowerCase()===e.key.toLowerCase());
+  if(index<0||!activateActionSlot(index))return false;
+  e.preventDefault();return true;
+}
 function handleBottomUI(mx,my){
   const sel=selectedEntities();
   const building=sel.length===1&&sel[0].kind==="building"&&sel[0].team===localTeam?sel[0]:null;
   const workers=sel.filter(e=>e.kind==="unit"&&e.team===localTeam&&e.type==="worker");
   if(!building&&!workers.length)return false;
+  const workerPanel=!building&&workers.length>0;
+  syncWorkerBuildMenu(workerPanel?workers:[]);
   const p=bottomPanelRect();
   if(mx<p.x||mx>p.x+p.w||my<p.y||my>p.y+p.h)return false;
   const bx=p.x+18,by=p.y+48,bw=116,bh=42,gap=9;
@@ -2684,9 +2897,25 @@ function handleBottomUI(mx,my){
         return true;
       }
     }
-  }else if(workers.length){
-    for(let i=0;i<buildButtons.length;i++){
-      const x=bx+i*(bw+gap),type=buildButtons[i];
+  }else if(workerPanel){
+    if(!activeBuildCategory){
+      for(let i=0;i<buildCategories.length;i++){
+        const category=buildCategories[i],x=bx+i*(bw+gap);
+        if(mx>=x&&mx<=x+bw&&my>=by&&my<=by+bh){
+          activeBuildCategory=category.key;buildPlacementMode=null;attackMoveMode=false;
+          return true;
+        }
+      }
+      return true;
+    }
+    const backX=p.x+p.w-88,backY=p.y+8,backW=70,backH=28;
+    if(mx>=backX&&mx<=backX+backW&&my>=backY&&my<=backY+backH){
+      activeBuildCategory=null;buildPlacementMode=null;
+      return true;
+    }
+    const buttons=currentBuildButtons();
+    for(let i=0;i<buttons.length;i++){
+      const x=bx+i*(bw+gap),type=buttons[i];
       if(mx>=x&&mx<=x+bw&&my>=by&&my<=by+bh){
         if(hasResources(localTeam,BUILDING_TYPES[type].cost)){
           buildPlacementMode=type;attackMoveMode=false;
@@ -2717,8 +2946,8 @@ function drawHUD(){
   const resourceText=practiceModeFor(localTeam)&&practiceInfiniteResources?"∞":Math.floor(teamResources[localTeam]||0);
   ctx.fillText(`자원 ${resourceText}   ·   인구 ${currentPop(localTeam)} / ${POP_CAP}`,innerWidth/2,35);
   ctx.font="12px sans-serif";ctx.fillStyle=(attackMoveMode||buildPlacementMode)?"#f4d35e":"#becad4";
-  const modeText=buildPlacementMode?`${BUILDING_TYPES[buildPlacementMode].name} 배치 지점을 좌클릭 · 우클릭/Esc 취소`:
-    attackMoveMode?"공격할 적 또는 이동 지점을 좌클릭 · Esc 취소":"사령부가 파괴되면 패배";
+  const modeText=buildPlacementMode?`${BUILDING_TYPES[buildPlacementMode].name} 배치 지점을 좌클릭 · 우클릭 취소`:
+    attackMoveMode?"공격할 적 또는 이동 지점을 좌클릭":"사령부가 파괴되면 패배";
   ctx.fillText(modeText,innerWidth/2,57);
   if(controlGroupNotice&&performance.now()<controlGroupNoticeUntil){
     ctx.fillStyle="rgba(8,12,15,.86)";ctx.fillRect(innerWidth/2-120,78,240,27);
@@ -2729,15 +2958,20 @@ function drawHUD(){
   const sel=selectedEntities();
   const selectedBuilding=sel.length===1&&sel[0].kind==="building"&&sel[0].team===localTeam?sel[0]:null;
   const selectedWorkers=sel.filter(e=>e.kind==="unit"&&e.team===localTeam&&e.type==="worker");
+  syncWorkerBuildMenu(!selectedBuilding?selectedWorkers:[]);
   if(selectedBuilding||selectedWorkers.length){
+    const workerPanel=!selectedBuilding&&selectedWorkers.length>0;
     const p=bottomPanelRect();
     ctx.fillStyle="rgba(8,12,15,.90)";ctx.fillRect(p.x,p.y,p.w,p.h);
     ctx.strokeStyle="rgba(255,255,255,.18)";ctx.strokeRect(p.x+.5,p.y+.5,p.w-1,p.h-1);
     ctx.textAlign="left";ctx.fillStyle="#fff";ctx.font="bold 13px sans-serif";
-    const title=selectedBuilding?`${selectedBuilding.name} ${selectedBuilding.complete?"생산":"건설 중"}`:`일꾼 건설 · ${selectedWorkers.length}명`;
+    const selectedProduces=selectedBuilding?(BUILDING_TYPES[selectedBuilding.type]?.produces||[]):[];
+    const activeCategoryName=buildCategories.find(category=>category.key===activeBuildCategory)?.name;
+    const title=selectedBuilding?`${selectedBuilding.name} ${selectedBuilding.complete?(selectedProduces.length?"생산":"방어 시설"):"건설 중"}`:
+      `일꾼 건설${activeCategoryName?` › ${activeCategoryName}`:""} · ${selectedWorkers.length}명`;
     ctx.fillText(title,p.x+18,p.y+25);
     ctx.font="11px sans-serif";ctx.fillStyle="#a9bac4";
-    if(selectedBuilding)ctx.fillText(`대기열 ${selectedBuilding.queue?.length||0} · 최대 인구 ${POP_CAP}`,p.x+150,p.y+25);
+    if(selectedBuilding&&selectedProduces.length)ctx.fillText(`대기열 ${selectedBuilding.queue?.length||0} · 최대 인구 ${POP_CAP}`,p.x+150,p.y+25);
 
     const bx=p.x+18,by=p.y+48,bw=116,bh=42,gap=9;
     if(selectedBuilding?.complete){
@@ -2747,17 +2981,31 @@ function drawHUD(){
         const can=hasResources(localTeam,s.cost)&&currentPop(localTeam)+queuedPop(localTeam)<POP_CAP;
         ctx.fillStyle=can?"#273b49":"#25292c";ctx.fillRect(x,by,bw,bh);
         ctx.strokeStyle="rgba(255,255,255,.15)";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
-        ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(s.name,x+bw/2,by+16);
+        ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(`[${ACTION_HOTKEYS[i]}] ${s.name}`,x+bw/2,by+16);
         ctx.font="10px sans-serif";ctx.fillText(`${s.cost}자원 · ${s.build.toFixed(1)}초`,x+bw/2,by+32);
       });
-    }else if(selectedWorkers.length){
-      buildButtons.forEach((type,i)=>{
+    }else if(workerPanel){
+      if(!activeBuildCategory){
+        buildCategories.forEach((category,i)=>{
+          const x=bx+i*(bw+gap);
+          ctx.fillStyle="#36566a";ctx.fillRect(x,by,bw,bh);
+          ctx.strokeStyle="#87d8ff";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
+          ctx.fillStyle="#fff";ctx.textAlign="center";ctx.font="bold 12px sans-serif";
+          ctx.fillText(`[${ACTION_HOTKEYS[i]}] ${category.name}`,x+bw/2,by+26);
+        });
+      }else{
+        const backX=p.x+p.w-88,backY=p.y+8,backW=70,backH=28;
+        ctx.fillStyle="#1d292f";ctx.fillRect(backX,backY,backW,backH);
+        ctx.strokeStyle="rgba(255,255,255,.18)";ctx.strokeRect(backX+.5,backY+.5,backW-1,backH-1);
+        ctx.fillStyle="#b9c7d0";ctx.textAlign="center";ctx.font="bold 10px sans-serif";ctx.fillText("← 분류 Shift",backX+backW/2,backY+19);
+        currentBuildButtons().forEach((type,i)=>{
         const s=BUILDING_TYPES[type],x=bx+i*(bw+gap),can=hasResources(localTeam,s.cost);
         ctx.fillStyle=can?"#314334":"#25292c";ctx.fillRect(x,by,bw,bh);
         ctx.strokeStyle="rgba(255,255,255,.15)";ctx.strokeRect(x+.5,by+.5,bw-1,bh-1);
-        ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(s.name,x+bw/2,by+16);
+        ctx.fillStyle=can?"#fff":"#70777b";ctx.textAlign="center";ctx.font="bold 12px sans-serif";ctx.fillText(`[${ACTION_HOTKEYS[i]}] ${s.name}`,x+bw/2,by+16);
         ctx.font="10px sans-serif";ctx.fillText(`${s.cost}자원 · ${s.build.toFixed(1)}초`,x+bw/2,by+32);
-      });
+        });
+      }
     }
   }
 
@@ -2826,7 +3074,7 @@ function loop(now){
     beginNavigationFrame(now);
     updateUnits(dt,nowSec);
     processNavigationJobs();
-    updateBuildings(dt);
+    updateBuildings(dt,nowSec);
     updateProjectiles(dt);
     updateSoloAI(dt);
     removeDead();

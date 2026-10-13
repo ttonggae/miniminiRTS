@@ -115,7 +115,7 @@
   우클릭: 이동 · 대상 명령<br>
   A → 좌클릭: 공격이동<br>
   S: 선택 유닛 정지<br>
-  일꾼 Z/X: 건설 분류 · 이후 Z~B: 건물 선택<br>
+  일꾼 Z/X/C: 생산·방어·자원 건설 분류 · 이후 Z~B: 건물 선택<br>
   생산건물 Z~B: 유닛 생산<br>
   Shift: 건설 분류로 돌아가기<br>
   P: 전체화면 + 마우스 잠금 켜기/끄기<br>
@@ -454,13 +454,14 @@ const UNIT_TYPES = {
 };
 
 const BUILDING_TYPES = {
-  hq:{name:"사령부",hp:1200,radius:42,vision:320,cost:0,build:0,produces:["worker"]},
+  hq:{name:"사령부",hp:1200,radius:42,vision:320,cost:0,build:0,produces:["worker"],resourceDropoff:true},
   barracks:{name:"병영",hp:650,radius:36,vision:270,cost:120,build:7,produces:["infantry","medic","sniper","antitank","antiair"]},
   factory:{name:"군수공장",hp:900,radius:42,vision:280,cost:180,build:10,produces:["heavyTank","artillery","radarVehicle","humvee"]},
   airport:{name:"공항",hp:720,radius:40,vision:300,cost:160,build:9,produces:["lightAircraft","stealthFighter"]},
   groundTurret:{name:"지상포탑",hp:720,radius:30,vision:330,cost:90,build:6,produces:[],range:235,damage:15,reload:.75,targets:["ground"]},
   radar:{name:"레이더",hp:540,radius:32,vision:650,detection:650,unobstructedVision:true,cost:120,build:7,produces:[]},
-  aaTurret:{name:"공대공 포탑",hp:660,radius:30,vision:460,cost:105,build:6.5,produces:[],range:290,damage:21,reload:.8,targets:["air"]}
+  aaTurret:{name:"공대공 포탑",hp:660,radius:30,vision:460,cost:105,build:6.5,produces:[],range:290,damage:21,reload:.8,targets:["air"]},
+  resourceDepot:{name:"자원창고",hp:600,radius:34,vision:260,cost:90,build:6,produces:[],resourceDropoff:true}
 };
 
 let nextId=1;
@@ -478,7 +479,7 @@ function makeUnit(type,team,x,y){
   const u={
     id:nextId++, kind:"unit", type, team, x,y, renderX:x, renderY:y,
     hp:s.hp,maxHp:s.hp,radius:s.radius, orders:[], cooldown:0,
-    carry:0,gatherPhase:"toNode",gatherTick:0,
+    carry:0,gatherPhase:"toNode",gatherTick:0,lastGatherNodeId:null,
     navPath:[],navPathIndex:0,navPathKey:"",navPathFailedKey:"",navPathRetry:0,navPathRadius:s.radius,navWaiting:false,
     navGoalX:x,navGoalY:y,navGoalProjected:false,
     shotCount:0,lastFireAt:-999,facing,renderFacing:facing,turretFacing:facing,renderTurretFacing:facing
@@ -885,8 +886,10 @@ function exportState(){
     t:"state",
     units:units.filter(u=>u.hp>0).map(u=>({
       id:u.id,type:u.type,team:u.team,x:u.x,y:u.y,hp:u.hp,maxHp:u.maxHp,radius:u.radius,
-      orders:u.orders.map(o=>({type:o.type,x:o.x,y:o.y,targetId:o.targetId||null})),
-      carry:u.carry,gatherPhase:u.gatherPhase,facing:u.facing,turretFacing:u.turretFacing
+      orders:u.orders.map(o=>({type:o.type,x:o.x,y:o.y,targetId:o.targetId||null,
+        resumeNodeId:o.resumeNodeId||null,dropoffId:o.dropoffId||null})),
+      carry:u.carry,gatherPhase:u.gatherPhase,lastGatherNodeId:u.lastGatherNodeId||null,
+      facing:u.facing,turretFacing:u.turretFacing
     })),
     buildings:buildings.filter(b=>b.hp>0).map(b=>{
       const data={id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision,
@@ -1050,15 +1053,30 @@ function applyCommand(team,cmd){
     const instant=instantBuildFor(team);
     const building=makeBuilding(type,team,x,y,instant);
     for(const u of builders){
-      u.orders=instant?[]:[{type:"build",targetId:building.id,x,y}];
-      invalidateNavPath(u);
+      const resumeGatherNodeId=resourceResumeNodeId(u);
+      if(instant){
+        u.orders=[];
+        if(!resumeResourceLoop(u,resumeGatherNodeId))invalidateNavPath(u);
+      }else{
+        u.orders=[{type:"build",targetId:building.id,x,y,resumeGatherNodeId}];
+        invalidateNavPath(u);
+      }
     }
   }else if(cmd.type==="assistBuild"){
     const building=getEntity(Number(cmd.targetId));
     if(!building||building.kind!=="building"||building.team!==team||building.complete) return;
     for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="worker")){
-      u.orders=[{type:"build",targetId:building.id,x:building.x,y:building.y}];
+      const resumeGatherNodeId=resourceResumeNodeId(u);
+      u.orders=[{type:"build",targetId:building.id,x:building.x,y:building.y,resumeGatherNodeId}];
       invalidateNavPath(u);
+    }
+  }else if(cmd.type==="returnResources"){
+    const dropoff=getEntity(Number(cmd.targetId));
+    if(!isResourceDropoff(dropoff,team))return;
+    for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="worker")){
+      const resumeNodeId=resourceResumeNodeId(u);
+      if(u.carry>0)startResourceReturn(u,dropoff,resumeNodeId);
+      else if(!resumeResourceLoop(u,resumeNodeId))invalidateNavPath(u);
     }
   }else if(cmd.type==="healTarget"){
     const target=getEntity(Number(cmd.targetId));
@@ -1772,8 +1790,15 @@ function resourceVisibleTo(team,resource){ return resource.team===team || pointV
 function startGather(u,node){
   if(!node||node.amount<=0) return;
   u.orders=[{type:"gather",targetId:node.id}];
+  u.lastGatherNodeId=node.id;
   u.gatherPhase="toNode"; u.gatherTick=0;
   invalidateNavPath(u);
+}
+function resourceResumeNodeId(u){
+  const order=u.orders[0];
+  if(order?.type==="gather")return order.targetId;
+  if(order?.type==="returnResources")return order.resumeNodeId||u.lastGatherNodeId||null;
+  return u.lastGatherNodeId||null;
 }
 function activeMinerCount(nodeId){
   return units.filter(u=>u.hp>0&&u.type==="worker"&&u.gatherPhase==="mining"&&u.orders[0]?.type==="gather"&&u.orders[0].targetId===nodeId).length;
@@ -1782,6 +1807,55 @@ function finishGatherOrder(u){
   if(u.orders[0]?.type==="gather") u.orders.shift();
   u.gatherPhase="toNode"; u.gatherTick=0;
   invalidateNavPath(u);
+}
+function isResourceDropoff(building,team){
+  return !!building&&building.kind==="building"&&building.team===team&&building.hp>0&&
+    building.complete!==false&&BUILDING_TYPES[building.type]?.resourceDropoff===true;
+}
+function nearestResourceDropoff(team,x,y){
+  let best=null,bestDistance=Infinity;
+  for(const building of buildings){
+    if(!isResourceDropoff(building,team))continue;
+    const distance=Math.hypot(building.x-x,building.y-y)-building.radius;
+    if(distance<bestDistance){best=building;bestDistance=distance;}
+  }
+  return best;
+}
+function startResourceReturn(u,dropoff,resumeNodeId=resourceResumeNodeId(u)){
+  if(!isResourceDropoff(dropoff,u.team))return false;
+  u.orders=[{type:"returnResources",targetId:dropoff.id,resumeNodeId:resumeNodeId||null}];
+  invalidateNavPath(u);
+  return true;
+}
+function resumeResourceLoop(u,nodeId=resourceResumeNodeId(u)){
+  const node=getResourceNode(Number(nodeId));
+  if(node)u.lastGatherNodeId=node.id;
+  if(u.carry>0){
+    const dropoff=nearestResourceDropoff(u.team,u.x,u.y);
+    if(dropoff)return startResourceReturn(u,dropoff,node?.id||nodeId||null);
+  }
+  if(node&&node.amount>0){startGather(u,node);return true;}
+  return false;
+}
+function finishResourceReturn(u,o){
+  if(u.orders[0]===o)u.orders.shift();
+  if(!resumeResourceLoop(u,o.resumeNodeId))invalidateNavPath(u);
+}
+function updateResourceReturn(u,o,dt){
+  if(u.carry<=0){finishResourceReturn(u,o);return;}
+  let dropoff=getEntity(Number(o.targetId));
+  if(!isResourceDropoff(dropoff,u.team)){
+    dropoff=nearestResourceDropoff(u.team,u.x,u.y);
+    if(!dropoff)return;
+    o.targetId=dropoff.id;
+    invalidateNavPath(u);
+  }
+  const arrival=dropoff.radius+u.radius+NAV_CLEARANCE+4;
+  if(moveUnitAlongPath(u,dropoff.x,dropoff.y,arrival,dt,`returnResources:${dropoff.id}`)){
+    teamResources[u.team]+=u.carry;
+    u.carry=0;
+    finishResourceReturn(u,o);
+  }
 }
 function moveToward(u,tx,ty,dt){
   const dx=tx-u.x,dy=ty-u.y,d=Math.hypot(dx,dy);
@@ -1888,8 +1962,7 @@ function updateProjectiles(dt){
 }
 function updateGather(u,o,dt){
   const node=getResourceNode(o.targetId);
-  const hq=hqByTeam[u.team];
-  if(!node||!hq||hq.hp<=0) return;
+  if(!node) return;
   if(node.amount<=0&&u.carry<=0){ finishGatherOrder(u); return; }
   if(u.gatherPhase==="toNode"){
     if(moveUnitAlongPath(u,node.x,node.y,node.radius+12,dt,`gather:${u.gatherPhase}`)){
@@ -1909,15 +1982,23 @@ function updateGather(u,o,dt){
       u.carry+=mined;
       node.amount=Math.max(0,node.amount-mined);
       if(u.carry>=5||node.amount<=0){
-        if(u.carry>0){u.gatherPhase="toHQ";invalidateNavPath(u);}
+        if(u.carry>0){u.gatherPhase="toHQ";delete o.dropoffId;invalidateNavPath(u);}
         else finishGatherOrder(u);
       }
     }
   }else if(u.gatherPhase==="toHQ"){
-    const dropoffRadius=hq.radius+u.radius+NAV_CLEARANCE+4;
-    if(moveUnitAlongPath(u,hq.x,hq.y,dropoffRadius,dt,`gather:${u.gatherPhase}`)){
+    let dropoff=getEntity(Number(o.dropoffId));
+    if(!isResourceDropoff(dropoff,u.team)){
+      dropoff=nearestResourceDropoff(u.team,u.x,u.y);
+      if(!dropoff)return;
+      o.dropoffId=dropoff.id;
+      invalidateNavPath(u);
+    }
+    const dropoffRadius=dropoff.radius+u.radius+NAV_CLEARANCE+4;
+    if(moveUnitAlongPath(u,dropoff.x,dropoff.y,dropoffRadius,dt,`gather:${u.gatherPhase}:${dropoff.id}`)){
       teamResources[u.team]+=u.carry;
       u.carry=0;
+      delete o.dropoffId;
       if(node.amount>0){u.gatherPhase="toNode";invalidateNavPath(u);}
       else finishGatherOrder(u);
     }
@@ -1954,7 +2035,7 @@ function healNearestAlly(u,dt){
 }
 function workersIgnoreCollisionWhileGathering(a,b){
   return a.type==="worker"&&b.type==="worker"&&
-    (a.orders[0]?.type==="gather"||b.orders[0]?.type==="gather");
+    (["gather","returnResources"].includes(a.orders[0]?.type)||["gather","returnResources"].includes(b.orders[0]?.type));
 }
 function updateAttackTarget(u,o,dt,nowSec){
   const target=getEntity(o.targetId);
@@ -1982,16 +2063,20 @@ function updateHealTarget(u,o,dt){
     target.hp=Math.min(target.maxHp,target.hp+s.healRate*dt);
   }else moveUnitAlongPath(u,target.x,target.y,s.healRange+target.radius,dt,`heal:${target.id}`);
 }
+function finishBuildOrder(u,o){
+  if(u.orders[0]===o)u.orders.shift();
+  if(!resumeResourceLoop(u,o.resumeGatherNodeId))invalidateNavPath(u);
+}
 function updateBuildOrder(u,o,dt){
   const building=getEntity(o.targetId);
-  if(!building||building.kind!=="building"||building.team!==u.team){u.orders.shift();return;}
-  if(building.complete){u.orders.shift();return;}
+  if(!building||building.kind!=="building"||building.team!==u.team){finishBuildOrder(u,o);return;}
+  if(building.complete){finishBuildOrder(u,o);return;}
   const distance=Math.hypot(building.x-u.x,building.y-u.y)-building.radius;
   if(distance<=22){
     building.buildRemaining=Math.max(0,building.buildRemaining-dt);
     const progress=1-building.buildRemaining/Math.max(.01,building.buildTime);
     building.hp=Math.max(1,building.maxHp*progress);
-    if(building.buildRemaining<=0){building.complete=true;building.hp=building.maxHp;u.orders.shift();}
+    if(building.buildRemaining<=0){building.complete=true;building.hp=building.maxHp;finishBuildOrder(u,o);}
   }else moveUnitAlongPath(u,building.x,building.y,building.radius+22,dt,`build:${building.id}`);
 }
 function movementOrderRequiredTerrain(o){
@@ -2129,6 +2214,7 @@ function updateUnits(dt,nowSec){
     if(u.type==="medic"&&o?.type!=="healTarget")healNearestAlly(u,dt);
 
     if(o?.type==="gather"&&u.type==="worker"){ updateGather(u,o,dt); continue; }
+    if(o?.type==="returnResources"&&u.type==="worker"){updateResourceReturn(u,o,dt);continue;}
     if(o?.type==="build"&&u.type==="worker"){updateBuildOrder(u,o,dt);continue;}
     if(o?.type==="healTarget"&&u.type==="medic"){updateHealTarget(u,o,dt);continue;}
     if(o?.type==="move"){
@@ -2439,6 +2525,15 @@ function enemyEntityAtWorld(x,y,team){
 function resourceAtWorld(x,y,team){
   return resourceNodes.find(r=>(typeof r.amount!=="number"||r.amount>0)&&Math.hypot(x-r.x,y-r.y)<=r.radius+12)||null;
 }
+function resourceDropoffAtWorld(x,y,team){
+  let best=null,bestDistance=Infinity;
+  for(const building of buildings){
+    if(!isResourceDropoff(building,team))continue;
+    const distance=Math.hypot(x-building.x,y-building.y);
+    if(distance<=building.radius+8&&distance<bestDistance){best=building;bestDistance=distance;}
+  }
+  return best;
+}
 
 canvas.addEventListener("mousemove",e=>{
   if(pointerLocked()){
@@ -2514,8 +2609,13 @@ canvas.addEventListener("mouseup",e=>{
       sendOrApplyCommand({type:"attackTarget",ids:us.map(u=>u.id),targetId:target.id});
       return;
     }
-    const ally=entityAtWorld(w.x,w.y,localTeam);
     const workers=us.filter(u=>u.type==="worker");
+    const clickedDropoff=resourceDropoffAtWorld(w.x,w.y,localTeam);
+    if(clickedDropoff&&workers.length){
+      sendOrApplyCommand({type:"returnResources",ids:workers.map(u=>u.id),targetId:clickedDropoff.id});
+      return;
+    }
+    const ally=entityAtWorld(w.x,w.y,localTeam);
     if(ally?.kind==="building"&&ally.complete===false&&workers.length){
       sendOrApplyCommand({type:"assistBuild",ids:workers.map(u=>u.id),targetId:ally.id});
       return;
@@ -2672,7 +2772,8 @@ function drawBuilding(b){
   ctx.save();ctx.translate(s.x,s.y);ctx.globalAlpha=visible?1:.48;
   const r=b.radius||36;
   const accent=b.type==="barracks"?"#6d8f58":b.type==="factory"?"#667483":b.type==="airport"?"#6d67a0":
-    b.type==="groundTurret"?"#7d6848":b.type==="radar"?"#397f82":b.type==="aaTurret"?"#735d83":"#4b8ddb";
+    b.type==="groundTurret"?"#7d6848":b.type==="radar"?"#397f82":b.type==="aaTurret"?"#735d83":
+    b.type==="resourceDepot"?"#9a7134":"#4b8ddb";
   ctx.fillStyle=b.team===localTeam?accent:"#b95050";
   ctx.fillRect(-r,-r,r*2,r*2);
   ctx.fillStyle="rgba(255,255,255,.18)";ctx.fillRect(-r+8,-r+8,r*2-16,Math.max(10,r*.38));
@@ -2693,6 +2794,11 @@ function drawBuilding(b){
     ctx.save();ctx.rotate(b.renderTurretFacing??b.turretFacing??0);
     ctx.strokeStyle="rgba(255,255,255,.68)";ctx.lineWidth=3;
     ctx.beginPath();ctx.moveTo(0,-6);ctx.lineTo(r*.82,-8);ctx.moveTo(0,6);ctx.lineTo(r*.82,8);ctx.stroke();ctx.restore();
+  }else if(b.type==="resourceDepot"){
+    ctx.fillStyle="rgba(28,22,12,.55)";ctx.fillRect(-r*.66,-r*.42,r*1.32,r*.84);
+    ctx.strokeStyle="rgba(255,225,145,.8)";ctx.lineWidth=2;
+    ctx.strokeRect(-r*.66,-r*.42,r*1.32,r*.84);
+    ctx.beginPath();ctx.moveTo(-r*.66,-r*.12);ctx.lineTo(r*.66,-r*.12);ctx.moveTo(-r*.66,r*.18);ctx.lineTo(r*.66,r*.18);ctx.stroke();
   }
   ctx.strokeStyle=sel?"#fff":"rgba(0,0,0,.45)";ctx.lineWidth=sel?3:2;ctx.strokeRect(-r-2,-r-2,r*2+4,r*2+4);
   ctx.fillStyle="#fff";ctx.font="bold 12px sans-serif";ctx.textAlign="center";
@@ -2832,7 +2938,8 @@ function drawVirtualCursor(){
 const ACTION_HOTKEYS=["Z","X","C","V","B"];
 const buildCategories=[
   {key:"production",name:"생산건물",types:["barracks","factory","airport"]},
-  {key:"defense",name:"방어건물",types:["groundTurret","radar","aaTurret"]}
+  {key:"defense",name:"방어건물",types:["groundTurret","radar","aaTurret"]},
+  {key:"resource",name:"자원",types:["resourceDepot"]}
 ];
 let activeBuildCategory=null;
 let buildMenuSelectionKey="";
@@ -2967,7 +3074,8 @@ function drawHUD(){
     ctx.textAlign="left";ctx.fillStyle="#fff";ctx.font="bold 13px sans-serif";
     const selectedProduces=selectedBuilding?(BUILDING_TYPES[selectedBuilding.type]?.produces||[]):[];
     const activeCategoryName=buildCategories.find(category=>category.key===activeBuildCategory)?.name;
-    const title=selectedBuilding?`${selectedBuilding.name} ${selectedBuilding.complete?(selectedProduces.length?"생산":"방어 시설"):"건설 중"}`:
+    const buildingRole=selectedBuilding&&BUILDING_TYPES[selectedBuilding.type]?.resourceDropoff&&selectedBuilding.type!=="hq"?"자원 시설":"방어 시설";
+    const title=selectedBuilding?`${selectedBuilding.name} ${selectedBuilding.complete?(selectedProduces.length?"생산":buildingRole):"건설 중"}`:
       `일꾼 건설${activeCategoryName?` › ${activeCategoryName}`:""} · ${selectedWorkers.length}명`;
     ctx.fillText(title,p.x+18,p.y+25);
     ctx.font="11px sans-serif";ctx.fillStyle="#a9bac4";

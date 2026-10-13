@@ -2430,6 +2430,8 @@ const mouse={x:innerWidth/2,y:innerHeight/2,worldX:0,worldY:0,down:false,startX:
 let selectedIds=[];
 let attackMoveMode=false;
 let buildPlacementMode=null;
+let minimapDragging=false;
+let minimapTerrainCache={source:null,width:0,height:0,canvas:null};
 const controlGroups=Array.from({length:10},()=>[]);
 let controlGroupNotice="",controlGroupNoticeUntil=0;
 
@@ -2449,6 +2451,28 @@ function clampCamera(){
   const viewW=innerWidth/camera.zoom,viewH=innerHeight/camera.zoom;
   camera.x=Math.max(0,Math.min(camera.x,Math.max(0,WORLD_W-viewW)));
   camera.y=Math.max(0,Math.min(camera.y,Math.max(0,WORLD_H-viewH)));
+}
+function minimapRect(){
+  const maxWidth=Math.max(110,Math.min(260,innerWidth*.2));
+  const maxHeight=Math.max(80,Math.min(190,innerHeight*.25));
+  let width=maxWidth,height=width*WORLD_H/Math.max(1,WORLD_W);
+  if(height>maxHeight){height=maxHeight;width=height*WORLD_W/Math.max(1,WORLD_H);}
+  width=Math.round(width);height=Math.round(height);
+  return{x:innerWidth-width-16,y:innerHeight-height-16,w:width,h:height};
+}
+function pointInMinimap(x,y){
+  if(!started)return false;
+  const rect=minimapRect();
+  return x>=rect.x&&x<=rect.x+rect.w&&y>=rect.y&&y<=rect.y+rect.h;
+}
+function centerCameraFromMinimap(x,y){
+  const rect=minimapRect();
+  const worldX=Math.max(0,Math.min(WORLD_W,(x-rect.x)/rect.w*WORLD_W));
+  const worldY=Math.max(0,Math.min(WORLD_H,(y-rect.y)/rect.h*WORLD_H));
+  camera.x=worldX-innerWidth/camera.zoom/2;
+  camera.y=worldY-innerHeight/camera.zoom/2;
+  clampCamera();
+  updateMouseWorldPosition();
 }
 function centerCameraForTeam(team){
   const hq=hqByTeam[team];
@@ -2540,12 +2564,20 @@ canvas.addEventListener("mousemove",e=>{
     mouse.x=Math.max(0,Math.min(innerWidth,mouse.x+(e.movementX||0)));
     mouse.y=Math.max(0,Math.min(innerHeight,mouse.y+(e.movementY||0)));
   }else{mouse.x=e.clientX;mouse.y=e.clientY;}
+  if(minimapDragging){centerCameraFromMinimap(mouse.x,mouse.y);return;}
   updateMouseWorldPosition();
   if(mouse.down&&Math.hypot(mouse.x-mouse.startX,mouse.y-mouse.startY)>5)mouse.drag=true;
 });
 canvas.addEventListener("mousedown",e=>{
   if(!started||gameOver||gamePaused)return;
   const p=eventScreenPoint(e);
+  if(pointInMinimap(p.x,p.y)){
+    if(e.button===0){
+      minimapDragging=true;mouse.down=false;mouse.drag=false;
+      centerCameraFromMinimap(p.x,p.y);
+    }
+    return;
+  }
   if(e.button===0){
     mouse.down=true;mouse.startX=p.x;mouse.startY=p.y;mouse.drag=false;
   }
@@ -2564,7 +2596,14 @@ canvas.addEventListener("wheel",e=>{
 },{passive:false});
 canvas.addEventListener("mouseup",e=>{
   if(!started||gameOver||gamePaused)return;
-  const p=eventScreenPoint(e),w=screenToWorld(p.x,p.y);
+  const p=eventScreenPoint(e);
+  if(e.button===0&&minimapDragging){
+    centerCameraFromMinimap(p.x,p.y);
+    minimapDragging=false;mouse.down=false;mouse.drag=false;
+    return;
+  }
+  if(pointInMinimap(p.x,p.y))return;
+  const w=screenToWorld(p.x,p.y);
 
   if(e.button===0&&mouse.down){
     mouse.down=false;
@@ -2664,6 +2703,7 @@ addEventListener("keydown",e=>{
 
 function updateCamera(dt){
   if(!started)return;
+  if(minimapDragging||pointInMinimap(mouse.x,mouse.y))return;
   const edge=18;
   if(mouse.x<=edge)camera.x-=camera.speed*dt;
   if(mouse.x>=innerWidth-edge)camera.x+=camera.speed*dt;
@@ -2683,6 +2723,7 @@ function updateHostWindowPause(){
 }
 document.addEventListener("visibilitychange",updateHostWindowPause);
 addEventListener("blur",updateHostWindowPause);
+addEventListener("blur",()=>{minimapDragging=false;mouse.down=false;mouse.drag=false;});
 addEventListener("focus",updateHostWindowPause);
 
 /* =========================
@@ -3149,6 +3190,64 @@ function drawFloating(){
   }
   ctx.globalAlpha=1;
 }
+function minimapTerrainColor(tile){
+  return tile===GROUND||tile===RESOURCE?"#3f6338":tile===HILL?"#746744":tile===RAMP?"#9a8557":
+    tile===WATER?"#1d526b":tile===VOID?"#030608":"#252b2f";
+}
+function minimapTerrainLayer(rect){
+  const width=Math.max(1,Math.round(rect.w)),height=Math.max(1,Math.round(rect.h));
+  if(minimapTerrainCache.source===terrain&&minimapTerrainCache.width===width&&
+    minimapTerrainCache.height===height&&minimapTerrainCache.canvas)return minimapTerrainCache.canvas;
+  const layer=document.createElement("canvas");
+  layer.width=width;layer.height=height;
+  const layerCtx=layer.getContext("2d");
+  for(let y=0;y<MAP_H;y++)for(let x=0;x<MAP_W;x++){
+    const left=Math.floor(x*width/MAP_W),top=Math.floor(y*height/MAP_H);
+    const right=Math.ceil((x+1)*width/MAP_W),bottom=Math.ceil((y+1)*height/MAP_H);
+    layerCtx.fillStyle=minimapTerrainColor(terrain[y][x]);
+    layerCtx.fillRect(left,top,right-left,bottom-top);
+  }
+  minimapTerrainCache={source:terrain,width,height,canvas:layer};
+  return layer;
+}
+function drawMinimap(){
+  if(!started)return;
+  const rect=minimapRect(),scaleX=rect.w/WORLD_W,scaleY=rect.h/WORLD_H;
+  ctx.save();
+  ctx.fillStyle="rgba(5,9,12,.92)";ctx.fillRect(rect.x-4,rect.y-4,rect.w+8,rect.h+8);
+  ctx.beginPath();ctx.rect(rect.x,rect.y,rect.w,rect.h);ctx.clip();
+  ctx.drawImage(minimapTerrainLayer(rect),rect.x,rect.y,rect.w,rect.h);
+  ctx.fillStyle="rgba(0,0,0,.12)";ctx.fillRect(rect.x,rect.y,rect.w,rect.h);
+
+  for(const resource of resourceNodes){
+    if(typeof resource.amount==="number"&&resource.amount<=0)continue;
+    const x=rect.x+resource.x*scaleX,y=rect.y+resource.y*scaleY;
+    ctx.fillStyle="#f2c94c";ctx.fillRect(x-2,y-2,4,4);
+  }
+  for(const building of buildings){
+    if(building.hp<=0)continue;
+    const visible=building.team===localTeam||building.type==="hq"||entityVisibleTo(localTeam,building);
+    if(!visible)continue;
+    const p=displayPos(building),x=rect.x+p.x*scaleX,y=rect.y+p.y*scaleY;
+    const size=Math.max(4,Math.min(8,building.radius*Math.min(scaleX,scaleY)*1.3));
+    ctx.fillStyle=building.team===localTeam?"#63c9ff":"#ff6969";
+    ctx.fillRect(x-size/2,y-size/2,size,size);
+  }
+  for(const unit of units){
+    if(unit.hp<=0||!entityVisibleTo(localTeam,unit))continue;
+    const p=displayPos(unit),x=rect.x+p.x*scaleX,y=rect.y+p.y*scaleY;
+    ctx.fillStyle=unit.team===localTeam?"#9be3ff":"#ff8b8b";
+    ctx.beginPath();ctx.arc(x,y,unitLayer(unit)==="air"?2.5:1.8,0,Math.PI*2);ctx.fill();
+  }
+
+  const viewWidth=Math.min(WORLD_W,innerWidth/camera.zoom),viewHeight=Math.min(WORLD_H,innerHeight/camera.zoom);
+  ctx.strokeStyle="#fff";ctx.lineWidth=1.5;
+  ctx.strokeRect(rect.x+camera.x*scaleX+.75,rect.y+camera.y*scaleY+.75,
+    Math.max(1,viewWidth*scaleX-1.5),Math.max(1,viewHeight*scaleY-1.5));
+  ctx.restore();
+  ctx.save();ctx.strokeStyle="rgba(170,225,255,.9)";ctx.lineWidth=2;
+  ctx.strokeRect(rect.x-3,rect.y-3,rect.w+6,rect.h+6);ctx.restore();
+}
 function draw(){
   ctx.clearRect(0,0,innerWidth,innerHeight);
   ctx.save();
@@ -3164,6 +3263,7 @@ function draw(){
   ctx.restore();
   drawSelectionBox();
   drawHUD();
+  drawMinimap();
   drawVirtualCursor();
 }
 

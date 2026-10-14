@@ -643,9 +643,13 @@ let practiceInfiniteResources=false,practiceInstantBuild=false;
 let peer=null, conn=null;
 let connected=false;
 let lastSnapshotSent=0;
+let snapshotSequence=0,lastSnapshotAcked=0;
+let pendingGuestSnapshot=null,lastGuestSnapshotSequence=-1;
 let connectionLost=false;
 let guestSessionToken=null;
 const GUEST_TOKEN_PREFIX="miniLinkRTS.guestToken.";
+const SNAPSHOT_INTERVAL_MS=80;
+const SNAPSHOT_BUFFER_LIMIT=192*1024;
 
 function practiceModeFor(team){return role==="solo"&&team===localTeam;}
 function hasResources(team,cost){return (practiceModeFor(team)&&practiceInfiniteResources)||teamResources[team]>=cost;}
@@ -719,6 +723,7 @@ function rejectGuestConnection(c,message="이미 참가 중인 게스트가 있�
 function acceptGuestConnection(c){
   const previous=conn;
   conn=c;connected=true;connectionLost=false;
+  lastSnapshotAcked=snapshotSequence;
   const firstConnection=!started;
   if(firstConnection)resetWorld();
   started=true;
@@ -786,7 +791,10 @@ function wireHostConnection(c){
   c.on("error",()=>{ if(conn===c) netText.textContent="연결 오류"; });
 }
 function sendHost(obj){
-  if(conn && conn.open) try{ conn.send(obj); }catch(_){}
+  if(conn && conn.open){
+    try{conn.send(obj);return true;}catch(_){}
+  }
+  return false;
 }
 
 function startGuest(hostId){
@@ -823,10 +831,11 @@ function startGuest(hostId){
         pauseBanner.textContent=text;pauseBanner.classList.add("show");
         return;
       }
-      if(authenticated)handleHostMessage(msg);
+      if(authenticated)queueHostMessage(msg);
     });
     conn.on("close",()=>{
       connected=false; connectionLost=true;
+      pendingGuestSnapshot=null;
       if(!rejected)netText.textContent="연결 끊김";
       if(!rejected)pauseBanner.textContent="호스트와 연결이 끊겼습니다";
       pauseBanner.classList.add("show");
@@ -883,9 +892,10 @@ hostBtn.onclick=startHost;
 soloBtn.onclick=startSolo;
 if(joinId) startGuest(joinId);
 
-function exportState(){
+function exportState(sequence=snapshotSequence){
   return {
     t:"state",
+    seq:sequence,
     units:units.filter(u=>u.hp>0).map(u=>({
       id:u.id,type:u.type,team:u.team,x:u.x,y:u.y,hp:u.hp,maxHp:u.maxHp,radius:u.radius,
       orders:u.orders.map(o=>({type:o.type,x:o.x,y:o.y,targetId:o.targetId||null,
@@ -918,12 +928,21 @@ function exportState(){
     gameOver,winnerTeam,paused:gamePaused,serverNow:performance.now()
   };
 }
+function connectionBufferedAmount(c=conn){
+  const channel=c?.dataChannel||c?._dc||c?._channel;
+  const amount=Number(channel?.bufferedAmount);
+  return Number.isFinite(amount)?amount:0;
+}
 function sendSnapshot(force=false){
   if(role!=="host" || !connected) return;
   const now=performance.now();
-  if(!force && now-lastSnapshotSent<80) return; // 약 12.5Hz
-  lastSnapshotSent=now;
-  sendHost(exportState());
+  if(!force && now-lastSnapshotSent<SNAPSHOT_INTERVAL_MS) return; // 약 12.5Hz
+  if(snapshotSequence-lastSnapshotAcked>=(force?3:2))return;
+  const buffered=connectionBufferedAmount();
+  const limit=force?SNAPSHOT_BUFFER_LIMIT*4:SNAPSHOT_BUFFER_LIMIT;
+  if(buffered>limit)return; // 오래될 전체 상태를 신뢰성 채널에 계속 쌓지 않는다.
+  const nextSequence=snapshotSequence+1;
+  if(sendHost(exportState(nextSequence))){snapshotSequence=nextSequence;lastSnapshotSent=now;}
 }
 function syncArrayInPlace(current,incoming,kind){
   const byId=new Map(current.map(e=>[e.id,e]));
@@ -983,8 +1002,37 @@ function handleHostMessage(msg){
     if(first) centerCameraForTeam(localTeam);
   }
 }
+function queueHostMessage(msg){
+  if(!msg||typeof msg!=="object")return;
+  if(msg.t!=="state"){
+    handleHostMessage(msg);
+    return;
+  }
+  const seq=Number(msg.seq);
+  if(Number.isFinite(seq)&&seq<=lastGuestSnapshotSequence)return;
+  const pendingSeq=Number(pendingGuestSnapshot?.seq);
+  if(Number.isFinite(seq)&&Number.isFinite(pendingSeq)&&seq<=pendingSeq)return;
+  pendingGuestSnapshot=msg;
+}
+function flushGuestSnapshot(){
+  if(role!=="guest"||!pendingGuestSnapshot)return;
+  const snapshot=pendingGuestSnapshot;
+  pendingGuestSnapshot=null;
+  const seq=Number(snapshot.seq);
+  if(Number.isFinite(seq)&&seq<=lastGuestSnapshotSequence)return;
+  handleHostMessage(snapshot);
+  if(Number.isFinite(seq)){
+    lastGuestSnapshotSequence=seq;
+    sendGuest({t:"stateAck",seq});
+  }
+}
 function handleGuestMessage(msg){
   if(role!=="host"||!msg||typeof msg!=="object") return;
+  if(msg.t==="stateAck"){
+    const seq=Number(msg.seq);
+    if(Number.isFinite(seq))lastSnapshotAcked=Math.max(lastSnapshotAcked,Math.min(seq,snapshotSequence));
+    return;
+  }
   if(msg.t!=="cmd") return;
   applyCommand(TEAM_RIGHT,msg.cmd);
 }
@@ -3543,6 +3591,7 @@ function draw(){
 let last=performance.now();
 function loop(now){
   const dt=Math.min((now-last)/1000,.04);last=now;
+  flushGuestSnapshot();
   updateCamera(dt);
   lerpRenderEntities(dt);
 

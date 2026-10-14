@@ -433,7 +433,7 @@ const UNIT_TYPES = {
   },
   radarVehicle: {
     name:"레이더차", hp:145, speed:78, range:0, damage:0, reload:1,
-    vision:610, detection:610, unobstructedVision:true, cost:90, build:8, radius:17, armor:"heavy", layer:"ground", targets:[],
+    vision:610, detection:610, cost:90, build:8, radius:17, armor:"heavy", layer:"ground", targets:[],
     special:"비전투 탐지 차량: 넓은 시야로 상시 클로킹 유닛 감지"
   },
   humvee: {
@@ -465,7 +465,7 @@ const BUILDING_TYPES = {
 };
 
 let nextId=1;
-let units=[], buildings=[], resourceNodes=[], projectiles=[], floatingTexts=[];
+let units=[], buildings=[], resourceNodes=[], projectiles=[], floatingTexts=[], visualEffects=[];
 let teamResources=[50,50];
 let gameOver=false, winnerTeam=null, gamePaused=false;
 let started=false;
@@ -482,7 +482,8 @@ function makeUnit(type,team,x,y){
     carry:0,gatherPhase:"toNode",gatherTick:0,lastGatherNodeId:null,
     navPath:[],navPathIndex:0,navPathKey:"",navPathFailedKey:"",navPathRetry:0,navPathRadius:s.radius,navWaiting:false,
     navGoalX:x,navGoalY:y,navGoalProjected:false,
-    shotCount:0,lastFireAt:-999,facing,renderFacing:facing,turretFacing:facing,renderTurretFacing:facing
+    shotCount:0,lastFireAt:-999,fireSerial:0,fireTargetId:null,fireTargetX:x,fireTargetY:y,
+    facing,renderFacing:facing,turretFacing:facing,renderTurretFacing:facing
   };
   units.push(u); return u;
 }
@@ -493,6 +494,7 @@ function makeBuilding(type,team,x,y,complete=true){
     id:nextId++,kind:"building",type,name:s.name,team,x,y,renderX:x,renderY:y,
     hp:complete?s.hp:1,maxHp:s.hp,radius:s.radius,vision:s.vision,queue:[],complete,
     buildTime:s.build,buildRemaining:complete?0:s.build,cooldown:0,lastFireAt:-999,
+    fireSerial:0,fireTargetId:null,fireTargetX:x,fireTargetY:y,
     turretFacing,renderTurretFacing:turretFacing
   };
   buildings.push(b); clearNavigationCache(); return b;
@@ -529,7 +531,7 @@ function findWorkerSpawn(team,index){
 
 function resetWorld(){
   clearNavigationCache();
-  nextId=1; units=[]; buildings=[]; resourceNodes=[]; projectiles=[]; floatingTexts=[];
+  nextId=1; units=[]; buildings=[]; resourceNodes=[]; projectiles=[]; floatingTexts=[]; visualEffects=[];
   teamResources=[50,50]; gameOver=false; winnerTeam=null; gamePaused=false;
 
   const p0=mapPointToWorld(activeMap.baseStarts.p1),p1=mapPointToWorld(activeMap.baseStarts.p2);
@@ -889,11 +891,14 @@ function exportState(){
       orders:u.orders.map(o=>({type:o.type,x:o.x,y:o.y,targetId:o.targetId||null,
         resumeNodeId:o.resumeNodeId||null,dropoffId:o.dropoffId||null})),
       carry:u.carry,gatherPhase:u.gatherPhase,lastGatherNodeId:u.lastGatherNodeId||null,
-      facing:u.facing,turretFacing:u.turretFacing
+      facing:u.facing,turretFacing:u.turretFacing,fireSerial:u.fireSerial||0,
+      fireTargetId:u.fireTargetId||null,fireTargetX:u.fireTargetX,fireTargetY:u.fireTargetY,fireEffectKind:u.fireEffectKind
     })),
     buildings:buildings.filter(b=>b.hp>0).map(b=>{
       const data={id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision,
-        complete:b.complete,buildTime:b.buildTime,buildRemaining:b.buildRemaining,turretFacing:b.turretFacing};
+        complete:b.complete,buildTime:b.buildTime,buildRemaining:b.buildRemaining,turretFacing:b.turretFacing,
+        fireSerial:b.fireSerial||0,fireTargetId:b.fireTargetId||null,fireTargetX:b.fireTargetX,
+        fireTargetY:b.fireTargetY,fireEffectKind:b.fireEffectKind};
       if(entityVisibleTo(TEAM_RIGHT,b)){
         data.hp=b.hp;
         data.maxHp=b.maxHp;
@@ -922,18 +927,25 @@ function sendSnapshot(force=false){
 }
 function syncArrayInPlace(current,incoming,kind){
   const byId=new Map(current.map(e=>[e.id,e]));
-  const next=[];
+  const next=[],nextIds=new Set();
   for(const raw of incoming){
     let e=byId.get(raw.id);
     if(!e){
       e={...raw,kind,renderX:raw.x,renderY:raw.y,renderFacing:raw.facing,renderTurretFacing:raw.turretFacing};
     }else{
+      const previousFireSerial=e.fireSerial||0;
       const rx=e.renderX ?? e.x, ry=e.renderY ?? e.y;
       const renderFacing=e.renderFacing ?? e.facing,renderTurretFacing=e.renderTurretFacing ?? e.turretFacing;
       Object.assign(e,raw);
       e.kind=kind;e.renderX=rx;e.renderY=ry;e.renderFacing=renderFacing;e.renderTurretFacing=renderTurretFacing;
+      if(kind!=="resource"&&(raw.fireSerial||0)>previousFireSerial&&
+        (e.team===localTeam||entityVisibleTo(localTeam,e)))spawnRemoteFireEffect(e,raw);
     }
-    next.push(e);
+    next.push(e);nextIds.add(e.id);
+  }
+  if(role==="guest"&&started&&kind!=="resource"){
+    for(const old of current)if(!nextIds.has(old.id)&&old.hp>0&&
+      (old.team===localTeam||entityVisibleTo(localTeam,old)))spawnDeathEffect(old);
   }
   return next;
 }
@@ -1053,10 +1065,10 @@ function applyCommand(team,cmd){
     const instant=instantBuildFor(team);
     const building=makeBuilding(type,team,x,y,instant);
     for(const u of builders){
-      const resumeGatherNodeId=resourceResumeNodeId(u);
+      const resumeGatherNodeId=activeResourceLoopNodeId(u);
       if(instant){
         u.orders=[];
-        if(!resumeResourceLoop(u,resumeGatherNodeId))invalidateNavPath(u);
+        if(!resumeGatherNodeId||!resumeResourceLoop(u,resumeGatherNodeId))invalidateNavPath(u);
       }else{
         u.orders=[{type:"build",targetId:building.id,x,y,resumeGatherNodeId}];
         invalidateNavPath(u);
@@ -1066,7 +1078,7 @@ function applyCommand(team,cmd){
     const building=getEntity(Number(cmd.targetId));
     if(!building||building.kind!=="building"||building.team!==team||building.complete) return;
     for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="worker")){
-      const resumeGatherNodeId=resourceResumeNodeId(u);
+      const resumeGatherNodeId=activeResourceLoopNodeId(u);
       u.orders=[{type:"build",targetId:building.id,x:building.x,y:building.y,resumeGatherNodeId}];
       invalidateNavPath(u);
     }
@@ -1800,6 +1812,12 @@ function resourceResumeNodeId(u){
   if(order?.type==="returnResources")return order.resumeNodeId||u.lastGatherNodeId||null;
   return u.lastGatherNodeId||null;
 }
+function activeResourceLoopNodeId(u){
+  const order=u.orders[0];
+  if(order?.type==="gather")return order.targetId;
+  if(order?.type==="returnResources")return order.resumeNodeId||null;
+  return null;
+}
 function activeMinerCount(nodeId){
   return units.filter(u=>u.hp>0&&u.type==="worker"&&u.gatherPhase==="mining"&&u.orders[0]?.type==="gather"&&u.orders[0].targetId===nodeId).length;
 }
@@ -1898,8 +1916,106 @@ function finalDamage(attacker,target,base){
   if(unitLayer(target)==="ground"&&tileAtWorld(target.x,target.y)===HILL) d*=HILL_DAMAGE_MULT;
   return d;
 }
+const SHELL_WEAPON_TYPES=new Set(["heavyTank","artillery","antitank","groundTurret","aaTurret","stealthFighter"]);
+function projectileEffectKind(type){return SHELL_WEAPON_TYPES.has(type)?"shell":"bullet";}
+function pushVisualEffect(effect){
+  effect.maxLife=effect.maxLife||effect.life||.2;
+  visualEffects.push(effect);
+  if(visualEffects.length>750)visualEffects.splice(0,visualEffects.length-750);
+  return effect;
+}
+function addEffectParticle(x,y,color,size=3,life=.35,speed=55,angle=Math.random()*Math.PI*2,gravity=0,team=null){
+  const velocity=speed*(.55+Math.random()*.75);
+  pushVisualEffect({type:"particle",x,y,vx:Math.cos(angle)*velocity,vy:Math.sin(angle)*velocity,
+    color,size:size*(.75+Math.random()*.5),life,maxLife:life,gravity,drag:2.4,team});
+}
+function addEffectBeam(x1,y1,x2,y2,color,width=2,life=.12,team=null){
+  pushVisualEffect({type:"beam",x1,y1,x2,y2,color,width,life,maxLife:life,team});
+}
+function addEffectRing(x,y,color,radius=4,growth=70,life=.35,width=2,team=null){
+  pushVisualEffect({type:"ring",x,y,color,radius,growth,life,maxLife:life,width,team});
+}
+function spawnWorkEffect(worker,target){
+  const dx=worker.x-target.x,dy=worker.y-target.y,distance=Math.hypot(dx,dy)||1;
+  const impactX=target.x+dx/distance*(target.radius||16)*.75;
+  const impactY=target.y+dy/distance*(target.radius||16)*.75;
+  const outward=Math.atan2(dy,dx);
+  for(let i=0;i<5;i++)addEffectParticle(impactX,impactY,i%3===0?"#fff1ae":"#ffb23e",2.1,.24,58,
+    outward+(Math.random()-.5)*1.9,55,worker.team);
+  for(let i=0;i<3;i++)addEffectParticle(impactX,impactY,i%2?"#8d806e":"#666c70",3.8,.48,24,
+    -Math.PI/2+(Math.random()-.5)*1.6,-14,worker.team);
+}
+function spawnMuzzleEffect(attacker,target,kind){
+  const angle=Math.atan2(target.y-attacker.y,target.x-attacker.x),distance=(attacker.radius||16)+5;
+  const x=attacker.x+Math.cos(angle)*distance,y=attacker.y+Math.sin(angle)*distance;
+  if(kind==="shell"){
+    addEffectRing(x,y,"#ffb347",3,55,.22,2.5,attacker.team);
+    for(let i=0;i<5;i++)addEffectParticle(x,y,i<2?"#fff1ad":"#ff8a3d",3,.25,70,
+      angle+(Math.random()-.5)*1.2,0,attacker.team);
+    for(let i=0;i<3;i++)addEffectParticle(x,y,"#778087",4,.45,25,
+      angle+Math.PI+(Math.random()-.5)*1.4,-8,attacker.team);
+  }else{
+    addEffectBeam(x-Math.cos(angle)*4,y-Math.sin(angle)*4,x+Math.cos(angle)*12,y+Math.sin(angle)*12,
+      "#fff2a8",3,.07,attacker.team);
+    for(let i=0;i<3;i++)addEffectParticle(x,y,"#ffc45e",1.8,.16,85,
+      angle+(Math.random()-.5)*.8,0,attacker.team);
+  }
+  return{x,y,angle};
+}
+function spawnRemoteFireEffect(source,event){
+  const targetX=Number(event.fireTargetX),targetY=Number(event.fireTargetY);
+  if(!Number.isFinite(targetX)||!Number.isFinite(targetY))return;
+  const kind=event.fireEffectKind||projectileEffectKind(source.type);
+  const target={x:targetX,y:targetY},muzzle=spawnMuzzleEffect(source,target,kind);
+  const dx=targetX-muzzle.x,dy=targetY-muzzle.y,distance=Math.hypot(dx,dy)||1;
+  const duration=Math.max(.06,Math.min(.65,distance/(kind==="shell"?520:1100)));
+  const stats=source.kind==="building"?BUILDING_TYPES[source.type]:UNIT_TYPES[source.type];
+  pushVisualEffect({type:"remoteShot",x:muzzle.x,y:muzzle.y,prevX:muzzle.x,prevY:muzzle.y,
+    vx:dx/duration,vy:dy/duration,targetX,targetY,team:source.team,effectKind:kind,
+    impactRadius:stats?.splashRadius||30,life:duration,maxLife:duration});
+}
+function spawnExplosion(x,y,radius=30,color="#ff9b3d",team=null){
+  const visualRadius=Math.max(18,Math.min(90,radius));
+  addEffectRing(x,y,"#ffd37a",5,visualRadius/.3,.3,3,team);
+  addEffectRing(x,y,color,2,visualRadius/.48,.48,2,team);
+  for(let i=0;i<Math.min(18,6+Math.round(visualRadius/7));i++)
+    addEffectParticle(x,y,i%3?color:"#fff0b0",2.5+Math.random()*2,.3+Math.random()*.28,
+      70+visualRadius*1.8,Math.random()*Math.PI*2,0,team);
+  for(let i=0;i<Math.min(8,3+Math.round(visualRadius/15));i++)
+    addEffectParticle(x,y,"#5f666b",4+Math.random()*4,.7+Math.random()*.35,
+      30+visualRadius*.7,Math.random()*Math.PI*2,-12,team);
+}
+function spawnProjectileImpact(projectile,target,attacker){
+  if(projectile.effectKind==="shell"){
+    const stats=attacker.kind==="building"?BUILDING_TYPES[attacker.type]:UNIT_TYPES[attacker.type];
+    spawnExplosion(target.x,target.y,stats?.splashRadius||30,
+      projectile.team===localTeam?"#ff9f43":"#ff6b4a",projectile.team);
+  }else{
+    addEffectRing(target.x,target.y,"#ffe49a",2,35,.18,1.5,projectile.team);
+    for(let i=0;i<4;i++)addEffectParticle(target.x,target.y,"#ffd166",1.8,.22,55,
+      Math.random()*Math.PI*2,0,projectile.team);
+  }
+}
+function spawnHealEffect(medic,target){
+  addEffectBeam(medic.x,medic.y,target.x,target.y,"#65ffad",2.5,.16,medic.team);
+  addEffectRing(target.x,target.y,"#68f5a4",target.radius*.35,25,.28,1.5,medic.team);
+  pushVisualEffect({type:"cross",x:target.x+(Math.random()-.5)*target.radius,y:target.y-target.radius*.4,
+    color:"#9bffc3",size:4,vy:-18,life:.55,maxLife:.55,team:medic.team});
+}
+function spawnDeathEffect(entity){
+  const heavy=entity.kind==="building"||unitArmor(entity)==="heavy"||unitArmor(entity)==="air";
+  const color=entity.team===localTeam?"#76cfff":"#ff7777",radius=entity.radius||16;
+  addEffectRing(entity.x,entity.y,heavy?"#ff9b45":color,Math.max(4,radius*.3),heavy?120:70,heavy?.55:.38,3,entity.team);
+  if(heavy)spawnExplosion(entity.x,entity.y,Math.min(70,radius*1.6),"#ff704d",entity.team);
+  const pieces=heavy?10:7;
+  for(let i=0;i<pieces;i++)pushVisualEffect({type:"debris",x:entity.x,y:entity.y,
+    vx:(Math.random()-.5)*(heavy?150:95),vy:(Math.random()-.5)*(heavy?150:95),
+    color:i%3===0?"#2b3034":color,size:2+Math.random()*(heavy?5:3),angle:Math.random()*Math.PI,
+    spin:(Math.random()-.5)*10,gravity:85,drag:1.4,life:.65+Math.random()*.45,maxLife:1.1,team:entity.team});
+}
 function addDamageText(target,amount,label=""){
-  floatingTexts.push({x:target.x,y:target.y-20,text:(label?label+" ":"")+"-"+Math.round(amount),life:.7});
+  floatingTexts.push({x:target.x,y:target.y-20,team:target.team,
+    text:(label?label+" ":"")+"-"+Math.round(amount),life:.7});
 }
 function applyDamage(attacker,target,base,label=""){
   if(!target||target.hp<=0) return 0;
@@ -1930,10 +2046,14 @@ function fireAt(u,target,nowSec){
   }
   u.cooldown=reload;
   u.lastFireAt=nowSec;
+  const effectKind=projectileEffectKind(u.type),muzzle=spawnMuzzleEffect(u,target,effectKind);
+  u.fireSerial=(u.fireSerial||0)+1;u.fireTargetId=target.id;
+  u.fireTargetX=target.x;u.fireTargetY=target.y;u.fireEffectKind=effectKind;
 
   projectiles.push({
-    x:u.x,y:u.y,targetId:target.id,team:u.team,speed:760,life:1.2,
-    baseDamage:base,attackerId:u.id,fromType:u.type,label
+    x:muzzle.x,y:muzzle.y,prevX:muzzle.x,prevY:muzzle.y,targetId:target.id,team:u.team,
+    speed:effectKind==="shell"?520:1100,life:effectKind==="shell"?2.2:1.15,
+    baseDamage:base,attackerId:u.id,fromType:u.type,label,effectKind,trailTick:0
   });
 }
 function updateProjectiles(dt){
@@ -1943,6 +2063,7 @@ function updateProjectiles(dt){
     if(!target||!attacker||p.life<=0){projectiles.splice(i,1);continue;}
     const dx=target.x-p.x,dy=target.y-p.y,d=Math.hypot(dx,dy),st=p.speed*dt;
     if(d<=st+target.radius){
+      spawnProjectileImpact(p,target,attacker);
       applyDamage(attacker,target,p.baseDamage,p.label);
 
       const attackStats=attacker.kind==="building"?BUILDING_TYPES[attacker.type]:UNIT_TYPES[attacker.type];
@@ -1956,7 +2077,15 @@ function updateProjectiles(dt){
       }
       projectiles.splice(i,1);
     }else{
+      p.prevX=p.x;p.prevY=p.y;
       p.x+=dx/d*st; p.y+=dy/d*st;
+      if(p.effectKind==="shell"){
+        p.trailTick=(p.trailTick||0)+dt;
+        if(p.trailTick>=.055){
+          p.trailTick=0;
+          addEffectParticle(p.x,p.y,"#737b80",3.5,.45,14,Math.atan2(-dy,-dx)+(Math.random()-.5)*.8,-5,p.team);
+        }
+      }
     }
   }
 }
@@ -1981,6 +2110,7 @@ function updateGather(u,o,dt){
       const mined=Math.min(ticks*.25,5-u.carry,node.amount);
       u.carry+=mined;
       node.amount=Math.max(0,node.amount-mined);
+      if(mined>0)spawnWorkEffect(u,node);
       if(u.carry>=5||node.amount<=0){
         if(u.carry>0){u.gatherPhase="toHQ";delete o.dropoffId;invalidateNavPath(u);}
         else finishGatherOrder(u);
@@ -2004,8 +2134,7 @@ function updateGather(u,o,dt){
     }
   }
 }
-function autoRepair(u,dt){
-  if(u.type!=="worker"||u.orders.length) return;
+function nearestRepairable(u){
   let best=null,bd=90;
   for(const e of [...units,...buildings]){
     if(e.team!==u.team||e.hp<=0||e.hp>=e.maxHp) continue;
@@ -2014,8 +2143,48 @@ function autoRepair(u,dt){
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
     if(d<bd){best=e;bd=d;}
   }
+  return best;
+}
+function autoRepair(u,dt){
+  if(u.type!=="worker"||u.orders.length) return;
+  const best=nearestRepairable(u);
   if(best){
     best.hp=Math.min(best.maxHp,best.hp+3*dt);
+    u._repairFx=(u._repairFx||0)-dt;
+    if(u._repairFx<=0){spawnWorkEffect(u,best);u._repairFx=.2;}
+  }
+}
+function updateGuestInteractionEffects(dt){
+  for(const u of units){
+    if(u.hp<=0||(u.team!==localTeam&&!entityVisibleTo(localTeam,u)))continue;
+    const order=u.orders?.[0];
+    if(u.type==="worker"&&order?.type==="gather"&&u.gatherPhase==="mining"){
+      const node=getResourceNode(order.targetId);
+      u._guestMiningFx=(u._guestMiningFx||0)-dt;
+      if(node&&u._guestMiningFx<=0){spawnWorkEffect(u,node);u._guestMiningFx=.25;}
+    }
+    if(u.type==="worker"&&order?.type==="build"){
+      const building=getEntity(order.targetId);
+      if(building&&building.complete===false&&Math.hypot(building.x-u.x,building.y-u.y)-building.radius<=24){
+        u._guestBuildFx=(u._guestBuildFx||0)-dt;
+        if(u._guestBuildFx<=0){spawnWorkEffect(u,building);u._guestBuildFx=.18;}
+      }
+    }
+    if(u.type==="worker"&&!order){
+      const target=nearestRepairable(u);
+      if(target){
+        u._guestRepairFx=(u._guestRepairFx||0)-dt;
+        if(u._guestRepairFx<=0){spawnWorkEffect(u,target);u._guestRepairFx=.2;}
+      }
+    }
+    if(u.type==="medic"){
+      const stats=UNIT_TYPES[u.type];
+      const target=order?.type==="healTarget"?getEntity(order.targetId):nearestHealable(u,stats.healRange);
+      if(target&&Math.hypot(target.x-u.x,target.y-u.y)-target.radius<=stats.healRange){
+        u._guestHealFx=(u._guestHealFx||0)-dt;
+        if(u._guestHealFx<=0){spawnHealEffect(u,target);u._guestHealFx=.18;}
+      }
+    }
   }
 }
 function nearestHealable(u,maxRange){
@@ -2031,6 +2200,8 @@ function healNearestAlly(u,dt){
   const s=UNIT_TYPES[u.type],target=nearestHealable(u,s.healRange);
   if(!target)return null;
   target.hp=Math.min(target.maxHp,target.hp+s.healRate*dt);
+  u._healFx=(u._healFx||0)-dt;
+  if(u._healFx<=0){spawnHealEffect(u,target);u._healFx=.18;}
   return target;
 }
 function workersIgnoreCollisionWhileGathering(a,b){
@@ -2061,11 +2232,14 @@ function updateHealTarget(u,o,dt){
   const distance=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
   if(distance<=s.healRange){
     target.hp=Math.min(target.maxHp,target.hp+s.healRate*dt);
+    u._healFx=(u._healFx||0)-dt;
+    if(u._healFx<=0){spawnHealEffect(u,target);u._healFx=.18;}
   }else moveUnitAlongPath(u,target.x,target.y,s.healRange+target.radius,dt,`heal:${target.id}`);
 }
 function finishBuildOrder(u,o){
   if(u.orders[0]===o)u.orders.shift();
-  if(!resumeResourceLoop(u,o.resumeGatherNodeId))invalidateNavPath(u);
+  if(o.resumeGatherNodeId&&resumeResourceLoop(u,o.resumeGatherNodeId))return;
+  invalidateNavPath(u);
 }
 function updateBuildOrder(u,o,dt){
   const building=getEntity(o.targetId);
@@ -2076,6 +2250,8 @@ function updateBuildOrder(u,o,dt){
     building.buildRemaining=Math.max(0,building.buildRemaining-dt);
     const progress=1-building.buildRemaining/Math.max(.01,building.buildTime);
     building.hp=Math.max(1,building.maxHp*progress);
+    u._buildFx=(u._buildFx||0)-dt;
+    if(u._buildFx<=0){spawnWorkEffect(u,building);u._buildFx=.18;}
     if(building.buildRemaining<=0){building.complete=true;building.hp=building.maxHp;finishBuildOrder(u,o);}
   }else moveUnitAlongPath(u,building.x,building.y,building.radius+22,dt,`build:${building.id}`);
 }
@@ -2359,6 +2535,12 @@ function updateBuildings(dt,nowSec){
   }
 }
 function removeDead(){
+  for(const entity of [...units,...buildings]){
+    if(entity.hp<=0&&!entity._deathEffectPlayed){
+      entity._deathEffectPlayed=true;
+      spawnDeathEffect(entity);
+    }
+  }
   units=units.filter(u=>u.hp>0);
   for(let i=0;i<hqByTeam.length;i++){
     if(hqByTeam[i]&&hqByTeam[i].hp<=0) hqByTeam[i].hp=0;
@@ -2946,9 +3128,20 @@ function drawUnit(u){
 function drawProjectiles(){
   if(role==="guest")return; // 게스트 스냅샷에는 투사체를 생략해 네트워크를 가볍게 유지
   for(const p of projectiles){
-    const s=worldToScreen(p.x,p.y);
-    ctx.fillStyle=p.team===localTeam?"#d9f0ff":"#ffd2d2";
-    ctx.beginPath();ctx.arc(s.x,s.y,3,0,Math.PI*2);ctx.fill();
+    if(p.team!==localTeam&&!pointVisibleTo(localTeam,p.x,p.y))continue;
+    const s=worldToScreen(p.x,p.y),previous=worldToScreen(p.prevX??p.x,p.prevY??p.y);
+    ctx.save();
+    if(p.effectKind==="shell"){
+      ctx.shadowColor=p.team===localTeam?"#ffd067":"#ff725f";ctx.shadowBlur=10;
+      ctx.fillStyle=p.team===localTeam?"#ffe39a":"#ff9a7f";
+      ctx.beginPath();ctx.arc(s.x,s.y,5,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle="#fff7d6";ctx.beginPath();ctx.arc(s.x,s.y,2,0,Math.PI*2);ctx.fill();
+    }else{
+      ctx.strokeStyle=p.team===localTeam?"#d9f5ff":"#ffd0bd";ctx.lineWidth=2.2;
+      ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=6;
+      ctx.beginPath();ctx.moveTo(previous.x,previous.y);ctx.lineTo(s.x,s.y);ctx.stroke();
+    }
+    ctx.restore();
   }
 }
 function drawFog(){
@@ -3183,8 +3376,84 @@ function updateFloating(dt){
     if(f.life<=0){floatingTexts.splice(i,1);continue;}
   }
 }
+function updateVisualEffects(dt){
+  for(let i=visualEffects.length-1;i>=0;i--){
+    const effect=visualEffects[i];effect.life-=dt;
+    if(effect.life<=0){
+      visualEffects.splice(i,1);
+      if(effect.type==="remoteShot"){
+        if(effect.effectKind==="shell")spawnExplosion(effect.targetX,effect.targetY,effect.impactRadius,
+          effect.team===localTeam?"#ff9f43":"#ff6b4a",effect.team);
+        else{
+          addEffectRing(effect.targetX,effect.targetY,"#ffe49a",2,35,.18,1.5,effect.team);
+          for(let spark=0;spark<4;spark++)addEffectParticle(effect.targetX,effect.targetY,"#ffd166",1.8,.22,55,
+            Math.random()*Math.PI*2,0,effect.team);
+        }
+      }
+      continue;
+    }
+    if(effect.type==="particle"||effect.type==="debris"){
+      effect.vy+=(effect.gravity||0)*dt;
+      effect.x+=effect.vx*dt;effect.y+=effect.vy*dt;
+      const drag=Math.max(0,1-(effect.drag||0)*dt);
+      effect.vx*=drag;effect.vy*=drag;
+      if(effect.type==="debris")effect.angle+=(effect.spin||0)*dt;
+    }else if(effect.type==="ring")effect.radius+=effect.growth*dt;
+    else if(effect.type==="remoteShot"){
+      effect.prevX=effect.x;effect.prevY=effect.y;effect.x+=effect.vx*dt;effect.y+=effect.vy*dt;
+      if(effect.effectKind==="shell"&&Math.random()<dt*18)
+        addEffectParticle(effect.x,effect.y,"#737b80",3.5,.45,14,
+          Math.atan2(-effect.vy,-effect.vx)+(Math.random()-.5)*.8,-5,effect.team);
+    }
+    else if(effect.type==="cross")effect.y+=(effect.vy||0)*dt;
+  }
+}
+function visualEffectVisibleToLocal(effect){
+  if(effect.team===null||effect.team===undefined||effect.team===localTeam)return true;
+  if(effect.type==="beam")return pointVisibleTo(localTeam,effect.x1,effect.y1)&&pointVisibleTo(localTeam,effect.x2,effect.y2);
+  return pointVisibleTo(localTeam,effect.x??effect.targetX,effect.y??effect.targetY);
+}
+function drawVisualEffects(){
+  for(const effect of visualEffects){
+    if(!visualEffectVisibleToLocal(effect))continue;
+    const alpha=Math.max(0,Math.min(1,effect.life/effect.maxLife));
+    ctx.save();ctx.globalAlpha=alpha;
+    if(effect.type==="beam"){
+      const a=worldToScreen(effect.x1,effect.y1),b=worldToScreen(effect.x2,effect.y2);
+      ctx.strokeStyle=effect.color;ctx.lineWidth=effect.width;ctx.shadowColor=effect.color;ctx.shadowBlur=7;
+      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    }else if(effect.type==="remoteShot"){
+      const p=worldToScreen(effect.x,effect.y),previous=worldToScreen(effect.prevX??effect.x,effect.prevY??effect.y);
+      if(effect.effectKind==="shell"){
+        ctx.fillStyle=effect.team===localTeam?"#ffe39a":"#ff9a7f";ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=10;
+        ctx.beginPath();ctx.arc(p.x,p.y,5,0,Math.PI*2);ctx.fill();
+      }else{
+        ctx.strokeStyle=effect.team===localTeam?"#d9f5ff":"#ffd0bd";ctx.lineWidth=2.2;
+        ctx.shadowColor=ctx.strokeStyle;ctx.shadowBlur=6;ctx.beginPath();ctx.moveTo(previous.x,previous.y);ctx.lineTo(p.x,p.y);ctx.stroke();
+      }
+    }else{
+      const p=worldToScreen(effect.x,effect.y);
+      if(effect.type==="ring"){
+        ctx.strokeStyle=effect.color;ctx.lineWidth=effect.width;ctx.shadowColor=effect.color;ctx.shadowBlur=8;
+        ctx.beginPath();ctx.arc(p.x,p.y,effect.radius,0,Math.PI*2);ctx.stroke();
+      }else if(effect.type==="cross"){
+        ctx.strokeStyle=effect.color;ctx.lineWidth=2.2;ctx.shadowColor=effect.color;ctx.shadowBlur=6;
+        ctx.beginPath();ctx.moveTo(p.x-effect.size,p.y);ctx.lineTo(p.x+effect.size,p.y);
+        ctx.moveTo(p.x,p.y-effect.size);ctx.lineTo(p.x,p.y+effect.size);ctx.stroke();
+      }else if(effect.type==="debris"){
+        ctx.translate(p.x,p.y);ctx.rotate(effect.angle);ctx.fillStyle=effect.color;
+        ctx.fillRect(-effect.size,-effect.size*.45,effect.size*2,effect.size*.9);
+      }else{
+        ctx.fillStyle=effect.color;ctx.shadowColor=effect.color;ctx.shadowBlur=Math.max(2,effect.size*1.8);
+        ctx.beginPath();ctx.arc(p.x,p.y,effect.size,0,Math.PI*2);ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+}
 function drawFloating(){
   for(const f of floatingTexts){
+    if(f.team!==null&&f.team!==undefined&&f.team!==localTeam&&!pointVisibleTo(localTeam,f.x,f.y))continue;
     const s=worldToScreen(f.x,f.y);
     ctx.globalAlpha=Math.min(1,f.life*2);ctx.fillStyle="#fff";ctx.font="bold 11px sans-serif";ctx.textAlign="center";ctx.fillText(f.text,s.x,s.y);
   }
@@ -3257,6 +3526,7 @@ function draw(){
   for(const b of buildings)drawBuilding(b);
   for(const u of units)drawUnit(u);
   drawProjectiles();
+  drawVisualEffects();
   drawFog();
   drawBuildPlacement();
   drawFloating();
@@ -3289,6 +3559,8 @@ function loop(now){
     checkGameOver();
   }
   if(authoritative)updateFloating(dt);
+  if(role==="guest"&&started&&!gamePaused)updateGuestInteractionEffects(dt);
+  if(!gamePaused)updateVisualEffects(dt);
   if(role==="host")sendSnapshot(false);
   draw();
   requestAnimationFrame(loop);

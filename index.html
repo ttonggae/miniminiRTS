@@ -650,6 +650,14 @@ let guestSessionToken=null;
 const GUEST_TOKEN_PREFIX="miniLinkRTS.guestToken.";
 const SNAPSHOT_INTERVAL_MS=80;
 const SNAPSHOT_BUFFER_LIMIT=192*1024;
+const SIDE_HOST="host",SIDE_GUEST="guest";
+let authorityOwner=SIDE_HOST,authorityTerm=1,authoritySyncing=false;
+let localWindowActive=true,remoteWindowActive=true,handoffPending=null;
+let localCommandSequence=0;
+const processedCommandIds=new Set();
+const deferredCommands=[];
+const pendingLocalCommands=new Map();
+let lastCommandRetryAt=0;
 
 function practiceModeFor(team){return role==="solo"&&team===localTeam;}
 function hasResources(team,cost){return (practiceModeFor(team)&&practiceInfiniteResources)||teamResources[team]>=cost;}
@@ -685,6 +693,21 @@ function setPauseNotice(paused,text="호스트 창 비활성화 · 게임 일시
   gamePaused=paused;
   pauseBanner.textContent=text;
   pauseBanner.classList.toggle("show",paused);
+  updateAuthorityStatus();
+}
+function networkSide(){return role===SIDE_HOST?SIDE_HOST:role===SIDE_GUEST?SIDE_GUEST:null;}
+function oppositeSide(side){return side===SIDE_HOST?SIDE_GUEST:SIDE_HOST;}
+function isNetworkGame(){return role===SIDE_HOST||role===SIDE_GUEST;}
+function localIsAuthority(){return role==="solo"||networkSide()===authorityOwner;}
+function currentWindowActive(){return !document.hidden&&document.hasFocus();}
+function updateAuthorityStatus(){
+  if(!isNetworkGame()||!connected)return;
+  netText.textContent=authoritySyncing?"상태 동기화 중":gamePaused?"안전 일시정지":
+    localIsAuthority()?"연결됨 · 이 화면 진행":"연결됨 · 상대 화면 진행";
+}
+function resetSnapshotFlow(){
+  snapshotSequence=0;lastSnapshotAcked=0;lastSnapshotSent=0;
+  pendingGuestSnapshot=null;lastGuestSnapshotSequence=-1;
 }
 
 function shouldWarnBeforeExit(){
@@ -722,19 +745,26 @@ function rejectGuestConnection(c,message="이미 참가 중인 게스트가 있�
 }
 function acceptGuestConnection(c){
   const previous=conn;
+  const recovering=started||connectionLost;
   conn=c;connected=true;connectionLost=false;
+  if(recovering){
+    authorityOwner=SIDE_HOST;authorityTerm+=1;authoritySyncing=false;handoffPending=null;
+    resetSnapshotFlow();
+  }
   lastSnapshotAcked=snapshotSequence;
   const firstConnection=!started;
   if(firstConnection)resetWorld();
   started=true;
   lobby.classList.add("hidden");
   netText.textContent="연결됨";
-  setPauseNotice(document.hidden||!document.hasFocus());
+  localWindowActive=currentWindowActive();
+  setPauseNotice(!localWindowActive,"진행 권한 동기화 중...");
   try{c.send({t:"authAccepted",token:guestSessionToken});}catch(_){}
-  sendHost({t:"hello",team:TEAM_RIGHT,map:exportMapData()});
-  sendHost({t:"pause",paused:gamePaused});
+  sendHost({t:"hello",team:TEAM_RIGHT,map:exportMapData(),authorityOwner,authorityTerm});
+  sendPresence();
   sendSnapshot(true);
   if(firstConnection)centerCameraForTeam(localTeam);
+  evaluateAuthorityState();
   if(previous&&previous!==c)try{previous.close();}catch(_){}
 }
 
@@ -743,6 +773,9 @@ function startHost(){
   applyMapData(chosenMap);
   setMapSelectionLocked(true);
   role="host"; localTeam=TEAM_LEFT; teamText.textContent="왼쪽 / 호스트";
+  authorityOwner=SIDE_HOST;authorityTerm=1;authoritySyncing=false;handoffPending=null;
+  localWindowActive=currentWindowActive();remoteWindowActive=true;resetSnapshotFlow();
+  processedCommandIds.clear();deferredCommands.length=0;pendingLocalCommands.clear();localCommandSequence=0;
   practiceInfiniteResources=false;practiceInstantBuild=false;updatePracticeTools();
   resetGuestBtn.style.display="block";
   hostBtn.disabled=true; soloBtn.disabled=true;
@@ -783,7 +816,9 @@ function wireHostConnection(c){
   });
   c.on("close",()=>{
     if(conn!==c) return;
+    if(pendingGuestSnapshot&&!localIsAuthority())flushGuestSnapshot();
     connected=false; connectionLost=true;
+    authoritySyncing=true;gamePaused=true;handoffPending=null;
     netText.textContent="연결 끊김";
     pauseBanner.textContent="게스트와 연결이 끊겼습니다 · 재접속을 기다리는 중";
     pauseBanner.classList.add("show");
@@ -799,6 +834,9 @@ function sendHost(obj){
 
 function startGuest(hostId){
   role="guest"; localTeam=TEAM_RIGHT; teamText.textContent="오른쪽 / 게스트";
+  authorityOwner=SIDE_HOST;authorityTerm=1;authoritySyncing=true;handoffPending=null;
+  localWindowActive=currentWindowActive();remoteWindowActive=true;resetSnapshotFlow();
+  processedCommandIds.clear();deferredCommands.length=0;pendingLocalCommands.clear();localCommandSequence=0;
   practiceInfiniteResources=false;practiceInstantBuild=false;updatePracticeTools();
   hostBtn.style.display="none"; soloBtn.style.display="none";
   mapPicker.style.display="none";
@@ -822,6 +860,7 @@ function startGuest(hostId){
         setLobbyMessage("연결 완료. 호스트 상태를 기다리는 중...");
         netText.textContent="연결됨";
         pauseBanner.classList.remove("show");
+        sendPresence();
         return;
       }
       if(msg?.t==="authRejected"){
@@ -834,7 +873,9 @@ function startGuest(hostId){
       if(authenticated)queueHostMessage(msg);
     });
     conn.on("close",()=>{
+      if(pendingGuestSnapshot&&!localIsAuthority())flushGuestSnapshot();
       connected=false; connectionLost=true;
+      authoritySyncing=true;gamePaused=true;handoffPending=null;
       pendingGuestSnapshot=null;
       if(!rejected)netText.textContent="연결 끊김";
       if(!rejected)pauseBanner.textContent="호스트와 연결이 끊겼습니다";
@@ -856,13 +897,211 @@ resetGuestBtn.onclick=()=>{
   const previous=conn;
   conn=null;connected=false;connectionLost=true;guestSessionToken=null;
   if(previous)try{previous.close();}catch(_){}
-  gamePaused=true;
+  authorityOwner=SIDE_HOST;authorityTerm+=1;authoritySyncing=true;handoffPending=null;gamePaused=true;
   netText.textContent="게스트 대기";
   pauseBanner.textContent="게스트 자리가 초기화되었습니다 · 새 접속을 기다리는 중";
   pauseBanner.classList.add("show");
 };
 function sendGuest(obj){
-  if(conn && conn.open) try{ conn.send(obj); }catch(_){}
+  if(conn && conn.open){
+    try{conn.send(obj);return true;}catch(_){}
+  }
+  return false;
+}
+function sendPeer(obj){
+  return role===SIDE_HOST?sendHost(obj):role===SIDE_GUEST?sendGuest(obj):false;
+}
+function sendPresence(){
+  if(!isNetworkGame()||!connected)return;
+  sendPeer({t:"presence",side:networkSide(),active:localWindowActive,term:authorityTerm});
+}
+function rememberProcessedCommand(id){
+  if(!id||processedCommandIds.has(id))return;
+  processedCommandIds.add(id);
+  while(processedCommandIds.size>1024)processedCommandIds.delete(processedCommandIds.values().next().value);
+}
+function commandTeam(side){return side===SIDE_HOST?TEAM_LEFT:TEAM_RIGHT;}
+function acknowledgeCommand(envelope){
+  if(envelope.side!==networkSide())sendPeer({t:"cmdAck",id:envelope.id,term:authorityTerm});
+}
+function executeCommandEnvelope(envelope){
+  if(!envelope?.id||processedCommandIds.has(envelope.id)){
+    if(envelope?.id)acknowledgeCommand(envelope);
+    return;
+  }
+  applyCommand(commandTeam(envelope.side),envelope.cmd);
+  rememberProcessedCommand(envelope.id);
+  pendingLocalCommands.delete(envelope.id);
+  acknowledgeCommand(envelope);
+}
+function receiveCommandEnvelope(envelope){
+  if(!envelope||envelope.side!==oppositeSide(networkSide())||!envelope.cmd)return;
+  if(processedCommandIds.has(envelope.id)){acknowledgeCommand(envelope);return;}
+  if(authoritySyncing){
+    if(!deferredCommands.some(item=>item.id===envelope.id))deferredCommands.push(envelope);
+    return;
+  }
+  if(!localIsAuthority()||Number(envelope.term)!==authorityTerm){
+    sendPresence();
+    return;
+  }
+  executeCommandEnvelope(envelope);
+}
+function flushDeferredCommands(){
+  const queued=deferredCommands.splice(0);
+  for(const envelope of queued){
+    envelope.term=authorityTerm;
+    if(processedCommandIds.has(envelope.id)){pendingLocalCommands.delete(envelope.id);continue;}
+    if(localIsAuthority())executeCommandEnvelope(envelope);
+    else if(envelope.side===networkSide()){
+      pendingLocalCommands.set(envelope.id,envelope);
+      envelope._lastSent=performance.now();sendPeer(envelope);
+    }else sendPeer(envelope);
+  }
+  if(localIsAuthority()){
+    for(const envelope of [...pendingLocalCommands.values()]){
+      envelope.term=authorityTerm;executeCommandEnvelope(envelope);
+    }
+  }
+}
+function beginAuthorityHandoff(to){
+  if(!connected||!localIsAuthority()||authoritySyncing||to===networkSide())return;
+  const term=authorityTerm+1;
+  authoritySyncing=true;
+  setPauseNotice(true,"진행 권한 인계 중 · 최신 상태 동기화...");
+  const state=exportState(0);
+  state.authorityOwner=to;state.authorityTerm=term;state.paused=true;
+  const message={t:"handoffOffer",from:networkSide(),to,term,state};
+  handoffPending={phase:"offered",term,to,message,lastSent:performance.now()};
+  sendPeer(message);
+}
+function cancelAuthorityHandoff(){
+  if(handoffPending?.phase!=="offered"||!localIsAuthority())return;
+  sendPeer({t:"handoffCancel",term:handoffPending.term,owner:authorityOwner});
+  handoffPending=null;authoritySyncing=false;
+  setPauseNotice(false);
+  flushDeferredCommands();
+  sendSnapshot(true);
+}
+function evaluateAuthorityState(){
+  if(!isNetworkGame()||!started)return;
+  if(!connected){authoritySyncing=true;setPauseNotice(true,"연결 복구 대기 · 게임 상태를 보존하고 있습니다");return;}
+  if(authoritySyncing){
+    if(localWindowActive&&handoffPending?.phase==="offered")cancelAuthorityHandoff();
+    return;
+  }
+  if(localIsAuthority()){
+    if(!localWindowActive){
+      if(remoteWindowActive)beginAuthorityHandoff(oppositeSide(networkSide()));
+      else if(!gamePaused){
+        setPauseNotice(true,"양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다");
+        sendPeer({t:"authoritySuspend",owner:authorityOwner,term:authorityTerm});
+        sendSnapshot(true);
+      }
+    }else if(gamePaused){
+      setPauseNotice(false);
+      sendPeer({t:"authorityResume",owner:authorityOwner,term:authorityTerm});
+      sendSnapshot(true);
+    }
+  }else if(localWindowActive&&!remoteWindowActive){
+    authoritySyncing=true;
+    setPauseNotice(true,"진행 권한 요청 중 · 상태 일치를 기다리는 중...");
+    sendPeer({t:"takeoverRequest",from:networkSide(),term:authorityTerm});
+  }else if(!localWindowActive&&!remoteWindowActive){
+    setPauseNotice(true,"양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다");
+  }
+}
+function handleAuthorityMessage(msg){
+  if(!msg||typeof msg!=="object")return false;
+  if(msg.t==="presence"){
+    if(msg.side===oppositeSide(networkSide()))remoteWindowActive=!!msg.active;
+    evaluateAuthorityState();return true;
+  }
+  if(msg.t==="stateAck"){
+    const seq=Number(msg.seq);
+    if(Number(msg.term)===authorityTerm&&Number.isFinite(seq))
+      lastSnapshotAcked=Math.max(lastSnapshotAcked,Math.min(seq,snapshotSequence));
+    return true;
+  }
+  if(msg.t==="cmd"){receiveCommandEnvelope(msg);return true;}
+  if(msg.t==="cmdAck"){
+    if(Number(msg.term)===authorityTerm)pendingLocalCommands.delete(msg.id);
+    return true;
+  }
+  if(msg.t==="takeoverRequest"){
+    remoteWindowActive=true;
+    if(localIsAuthority()&&!localWindowActive&&!authoritySyncing)beginAuthorityHandoff(msg.from);
+    else sendPresence();
+    return true;
+  }
+  if(msg.t==="handoffOffer"){
+    if(msg.to!==networkSide()||msg.from!==authorityOwner||Number(msg.term)!==authorityTerm+1)return true;
+    if(!localWindowActive){sendPresence();return true;}
+    authoritySyncing=true;
+    applyStateSnapshot(msg.state||{});
+    authoritySyncing=true;
+    setPauseNotice(true,"진행 권한 인계 확인 중...");
+    const response={t:"handoffAccept",from:networkSide(),to:msg.from,term:Number(msg.term)};
+    handoffPending={phase:"accepted",term:Number(msg.term),from:msg.from,message:response,lastSent:performance.now()};
+    sendPeer(response);return true;
+  }
+  if(msg.t==="handoffAccept"){
+    if(handoffPending?.phase!=="offered"||msg.from!==handoffPending.to||Number(msg.term)!==handoffPending.term)return true;
+    authorityOwner=msg.from;authorityTerm=Number(msg.term);resetSnapshotFlow();
+    const commit={t:"handoffCommit",owner:authorityOwner,term:authorityTerm};
+    handoffPending={phase:"committed",term:authorityTerm,to:authorityOwner,message:commit,lastSent:performance.now()};
+    setPauseNotice(true,"상대 화면으로 진행 권한을 인계했습니다");
+    sendPeer(commit);return true;
+  }
+  if(msg.t==="handoffCommit"){
+    if(msg.owner!==networkSide())return true;
+    const term=Number(msg.term);
+    if(term<authorityTerm)return true;
+    if(authorityOwner===networkSide()&&term===authorityTerm&&!authoritySyncing){
+      sendPeer({t:"handoffReady",owner:authorityOwner,term:authorityTerm});return true;
+    }
+    authorityOwner=networkSide();authorityTerm=term;authoritySyncing=false;handoffPending=null;
+    resetSnapshotFlow();
+    clearNavigationCache();
+    for(const unit of units)invalidateNavPath(unit);
+    setPauseNotice(!localWindowActive,!localWindowActive?
+      "양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다":"");
+    sendPeer({t:"handoffReady",owner:authorityOwner,term:authorityTerm});
+    sendPresence();flushDeferredCommands();evaluateAuthorityState();sendSnapshot(true);return true;
+  }
+  if(msg.t==="handoffReady"){
+    if(handoffPending?.phase==="committed"&&msg.owner===authorityOwner&&Number(msg.term)===authorityTerm){
+      handoffPending=null;authoritySyncing=false;flushDeferredCommands();
+      setPauseNotice(false);sendPresence();evaluateAuthorityState();
+    }
+    return true;
+  }
+  if(msg.t==="handoffCancel"){
+    if(handoffPending?.phase==="accepted"&&Number(msg.term)===handoffPending.term){
+      handoffPending=null;authoritySyncing=false;authorityOwner=msg.owner;setPauseNotice(false);flushDeferredCommands();
+    }
+    return true;
+  }
+  if(msg.t==="authoritySuspend"&&msg.owner===authorityOwner&&Number(msg.term)===authorityTerm){
+    setPauseNotice(true,"양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다");return true;
+  }
+  if(msg.t==="authorityResume"&&msg.owner===authorityOwner&&Number(msg.term)===authorityTerm){
+    authoritySyncing=false;setPauseNotice(false);flushDeferredCommands();return true;
+  }
+  return false;
+}
+function maintainAuthorityProtocol(now){
+  if(!isNetworkGame()||!connected)return;
+  if(handoffPending&&now-handoffPending.lastSent>350){
+    handoffPending.lastSent=now;sendPeer(handoffPending.message);
+  }
+  if(now-lastCommandRetryAt>300){
+    lastCommandRetryAt=now;
+    for(const envelope of pendingLocalCommands.values()){
+      if(processedCommandIds.has(envelope.id)){pendingLocalCommands.delete(envelope.id);continue;}
+      envelope.term=authorityTerm;envelope._lastSent=now;sendPeer(envelope);
+    }
+  }
 }
 
 function startSolo(){
@@ -895,35 +1134,26 @@ if(joinId) startGuest(joinId);
 function exportState(sequence=snapshotSequence){
   return {
     t:"state",
-    seq:sequence,
+    seq:sequence,authorityOwner,authorityTerm,
+    nextId,
     units:units.filter(u=>u.hp>0).map(u=>({
       id:u.id,type:u.type,team:u.team,x:u.x,y:u.y,hp:u.hp,maxHp:u.maxHp,radius:u.radius,
-      orders:u.orders.map(o=>({type:o.type,x:o.x,y:o.y,targetId:o.targetId||null,
-        resumeNodeId:o.resumeNodeId||null,dropoffId:o.dropoffId||null})),
-      carry:u.carry,gatherPhase:u.gatherPhase,lastGatherNodeId:u.lastGatherNodeId||null,
+      orders:u.orders.map(o=>({...o})),cooldown:u.cooldown,shotCount:u.shotCount,lastFireAt:u.lastFireAt,
+      carry:u.carry,gatherPhase:u.gatherPhase,gatherTick:u.gatherTick,lastGatherNodeId:u.lastGatherNodeId||null,
       facing:u.facing,turretFacing:u.turretFacing,fireSerial:u.fireSerial||0,
       fireTargetId:u.fireTargetId||null,fireTargetX:u.fireTargetX,fireTargetY:u.fireTargetY,fireEffectKind:u.fireEffectKind
     })),
-    buildings:buildings.filter(b=>b.hp>0).map(b=>{
-      const data={id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision,
+    buildings:buildings.filter(b=>b.hp>0).map(b=>({
+      id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision,
         complete:b.complete,buildTime:b.buildTime,buildRemaining:b.buildRemaining,turretFacing:b.turretFacing,
+        hp:b.hp,maxHp:b.maxHp,cooldown:b.cooldown,lastFireAt:b.lastFireAt,
+        queue:b.queue.map(q=>({...q})),
         fireSerial:b.fireSerial||0,fireTargetId:b.fireTargetId||null,fireTargetX:b.fireTargetX,
-        fireTargetY:b.fireTargetY,fireEffectKind:b.fireEffectKind};
-      if(entityVisibleTo(TEAM_RIGHT,b)){
-        data.hp=b.hp;
-        data.maxHp=b.maxHp;
-        data.queue=b.queue.map(q=>({type:q.type,time:q.time,max:q.max}));
-      }
-      return data;
-    }),
-    resourceNodes:resourceNodes.map(r=>{
-      const data={id:r.id,team:r.team,x:r.x,y:r.y,radius:r.radius};
-      if(resourceVisibleTo(TEAM_RIGHT,r)){
-        data.amount=r.amount;
-        data.maxAmount=r.maxAmount;
-      }
-      return data;
-    }),
+        fireTargetY:b.fireTargetY,fireEffectKind:b.fireEffectKind
+    })),
+    resourceNodes:resourceNodes.map(r=>({...r})),
+    projectiles:projectiles.map(p=>({...p})),
+    processedCommandIds:Array.from(processedCommandIds).slice(-512),
     teamResources:[teamResources[0],teamResources[1]],
     gameOver,winnerTeam,paused:gamePaused,serverNow:performance.now()
   };
@@ -934,7 +1164,7 @@ function connectionBufferedAmount(c=conn){
   return Number.isFinite(amount)?amount:0;
 }
 function sendSnapshot(force=false){
-  if(role!=="host" || !connected) return;
+  if(!isNetworkGame()||!localIsAuthority()||authoritySyncing||!connected) return;
   const now=performance.now();
   if(!force && now-lastSnapshotSent<SNAPSHOT_INTERVAL_MS) return; // 약 12.5Hz
   if(snapshotSequence-lastSnapshotAcked>=(force?3:2))return;
@@ -942,7 +1172,7 @@ function sendSnapshot(force=false){
   const limit=force?SNAPSHOT_BUFFER_LIMIT*4:SNAPSHOT_BUFFER_LIMIT;
   if(buffered>limit)return; // 오래될 전체 상태를 신뢰성 채널에 계속 쌓지 않는다.
   const nextSequence=snapshotSequence+1;
-  if(sendHost(exportState(nextSequence))){snapshotSequence=nextSequence;lastSnapshotSent=now;}
+  if(sendPeer(exportState(nextSequence))){snapshotSequence=nextSequence;lastSnapshotSent=now;}
 }
 function syncArrayInPlace(current,incoming,kind){
   const byId=new Map(current.map(e=>[e.id,e]));
@@ -960,9 +1190,19 @@ function syncArrayInPlace(current,incoming,kind){
       if(kind!=="resource"&&(raw.fireSerial||0)>previousFireSerial&&
         (e.team===localTeam||entityVisibleTo(localTeam,e)))spawnRemoteFireEffect(e,raw);
     }
+    if(kind==="unit"){
+      e.orders=Array.isArray(e.orders)?e.orders:[];e.cooldown=Number(e.cooldown)||0;
+      e.navPath=Array.isArray(e.navPath)?e.navPath:[];e.navPathIndex=Number(e.navPathIndex)||0;
+      e.navPathKey=e.navPathKey||"";e.navPathFailedKey=e.navPathFailedKey||"";
+      e.navPathRetry=Number(e.navPathRetry)||0;e.navPathRadius=e.navPathRadius||e.radius;e.navWaiting=false;
+      e.navGoalX=Number.isFinite(e.navGoalX)?e.navGoalX:e.x;e.navGoalY=Number.isFinite(e.navGoalY)?e.navGoalY:e.y;
+      e.navGoalProjected=!!e.navGoalProjected;
+    }else if(kind==="building"){
+      e.queue=Array.isArray(e.queue)?e.queue:[];e.cooldown=Number(e.cooldown)||0;
+    }
     next.push(e);nextIds.add(e.id);
   }
-  if(role==="guest"&&started&&kind!=="resource"){
+  if(!localIsAuthority()&&started&&kind!=="resource"){
     for(const old of current)if(!nextIds.has(old.id)&&old.hp>0&&
       (old.team===localTeam||entityVisibleTo(localTeam,old)))spawnDeathEffect(old);
   }
@@ -981,33 +1221,49 @@ function handleHostMessage(msg){
       }
     }
     localTeam=msg.team;
+    if(Number.isFinite(Number(msg.authorityTerm)))authorityTerm=Number(msg.authorityTerm);
+    if(msg.authorityOwner===SIDE_HOST||msg.authorityOwner===SIDE_GUEST)authorityOwner=msg.authorityOwner;
+    authoritySyncing=true;
+    setPauseNotice(true,"최신 게임 상태 동기화 중...");
     teamText.textContent="오른쪽 / 게스트";
   }else if(msg.t==="pause"){
     setPauseNotice(!!msg.paused,"호스트가 다른 창을 보고 있어 게임이 일시정지되었습니다");
   }else if(msg.t==="state"){
-    const first=!started;
-    units=syncArrayInPlace(units,msg.units||[],"unit");
-    buildings=syncArrayInPlace(buildings,msg.buildings||[],"building");
-    resourceNodes=syncArrayInPlace(resourceNodes,msg.resourceNodes||[],"resource");
-    hqByTeam[0]=buildings.find(b=>b.team===0&&b.type==="hq")||null;
-    hqByTeam[1]=buildings.find(b=>b.team===1&&b.type==="hq")||null;
-    nodeByTeam[0]=resourceNodes.find(r=>r.team===0)||null;
-    nodeByTeam[1]=resourceNodes.find(r=>r.team===1)||null;
-    teamResources=msg.teamResources||teamResources;
-    gameOver=!!msg.gameOver;
-    winnerTeam=msg.winnerTeam;
-    setPauseNotice(!!msg.paused,"호스트가 다른 창을 보고 있어 게임이 일시정지되었습니다");
-    started=true;
-    lobby.classList.add("hidden");
-    if(first) centerCameraForTeam(localTeam);
+    applyStateSnapshot(msg);
   }
+}
+function applyStateSnapshot(msg){
+  const first=!started;
+  units=syncArrayInPlace(units,msg.units||[],"unit");
+  buildings=syncArrayInPlace(buildings,msg.buildings||[],"building");
+  resourceNodes=syncArrayInPlace(resourceNodes,msg.resourceNodes||[],"resource");
+  projectiles=(msg.projectiles||[]).map(p=>({...p}));
+  hqByTeam[0]=buildings.find(b=>b.team===0&&b.type==="hq")||null;
+  hqByTeam[1]=buildings.find(b=>b.team===1&&b.type==="hq")||null;
+  nodeByTeam[0]=resourceNodes.find(r=>r.team===0)||null;
+  nodeByTeam[1]=resourceNodes.find(r=>r.team===1)||null;
+  teamResources=msg.teamResources||teamResources;
+  const highestId=Math.max(0,...units.map(e=>e.id),...buildings.map(e=>e.id),...resourceNodes.map(e=>e.id));
+  nextId=Math.max(Number(msg.nextId)||1,highestId+1);
+  for(const id of msg.processedCommandIds||[])rememberProcessedCommand(id);
+  gameOver=!!msg.gameOver;
+  winnerTeam=msg.winnerTeam;
+  if(!handoffPending)authoritySyncing=false;
+  if(handoffPending)setPauseNotice(true,"진행 권한 인계 확인 중...");
+  else setPauseNotice(!!msg.paused,"양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다");
+  started=true;
+  lobby.classList.add("hidden");
+  if(first) centerCameraForTeam(localTeam);
 }
 function queueHostMessage(msg){
   if(!msg||typeof msg!=="object")return;
   if(msg.t!=="state"){
-    handleHostMessage(msg);
+    if(!handleAuthorityMessage(msg))handleHostMessage(msg);
     return;
   }
+  const remoteSide=oppositeSide(networkSide());
+  if(msg.authorityOwner&&msg.authorityOwner!==remoteSide)return;
+  if(Number.isFinite(Number(msg.authorityTerm))&&Number(msg.authorityTerm)!==authorityTerm)return;
   const seq=Number(msg.seq);
   if(Number.isFinite(seq)&&seq<=lastGuestSnapshotSequence)return;
   const pendingSeq=Number(pendingGuestSnapshot?.seq);
@@ -1015,7 +1271,7 @@ function queueHostMessage(msg){
   pendingGuestSnapshot=msg;
 }
 function flushGuestSnapshot(){
-  if(role!=="guest"||!pendingGuestSnapshot)return;
+  if(!isNetworkGame()||localIsAuthority()||!pendingGuestSnapshot)return;
   const snapshot=pendingGuestSnapshot;
   pendingGuestSnapshot=null;
   const seq=Number(snapshot.seq);
@@ -1023,23 +1279,40 @@ function flushGuestSnapshot(){
   handleHostMessage(snapshot);
   if(Number.isFinite(seq)){
     lastGuestSnapshotSequence=seq;
-    sendGuest({t:"stateAck",seq});
+    sendPeer({t:"stateAck",seq,term:authorityTerm});
   }
 }
 function handleGuestMessage(msg){
   if(role!=="host"||!msg||typeof msg!=="object") return;
-  if(msg.t==="stateAck"){
-    const seq=Number(msg.seq);
-    if(Number.isFinite(seq))lastSnapshotAcked=Math.max(lastSnapshotAcked,Math.min(seq,snapshotSequence));
+  if(msg.t==="state"){
+    queueHostMessage(msg);
     return;
   }
-  if(msg.t!=="cmd") return;
-  applyCommand(TEAM_RIGHT,msg.cmd);
+  if(handleAuthorityMessage(msg))return;
+  if(msg.t==="stateAck"){
+    const seq=Number(msg.seq);
+    if(Number(msg.term)===authorityTerm&&Number.isFinite(seq))
+      lastSnapshotAcked=Math.max(lastSnapshotAcked,Math.min(seq,snapshotSequence));
+    return;
+  }
+  if(msg.t==="cmd")receiveCommandEnvelope(msg);
 }
 
 function sendOrApplyCommand(cmd){
-  if(role==="guest") sendGuest({t:"cmd",cmd});
-  else applyCommand(localTeam,cmd);
+  if(role==="solo"){applyCommand(localTeam,cmd);return;}
+  if(!isNetworkGame()||!connected||gameOver)return;
+  const side=networkSide();
+  const envelope={t:"cmd",id:`${side}:${++localCommandSequence}`,side,term:authorityTerm,cmd};
+  if(authoritySyncing||gamePaused){
+    deferredCommands.push(envelope);
+    setPauseNotice(true,authoritySyncing?"상태 동기화 중 · 명령을 잠시 보관합니다":"재개 대기 중 · 명령을 잠시 보관합니다");
+    return;
+  }
+  if(localIsAuthority())executeCommandEnvelope(envelope);
+  else{
+    pendingLocalCommands.set(envelope.id,envelope);
+    envelope._lastSent=performance.now();sendPeer(envelope);
+  }
 }
 
 /* =========================
@@ -2943,18 +3216,17 @@ function updateCamera(dt){
   updateMouseWorldPosition();
 }
 
-/* 호스트 창이 백그라운드면 일시정지 상태를 별도 메시지로 즉시 알린다. */
-function updateHostWindowPause(){
-  if(role!=="host"||!started) return;
-  const paused=document.hidden||!document.hasFocus();
-  setPauseNotice(paused);
-  sendHost({t:"pause",paused});
-  sendSnapshot(true);
+/* 활성 화면만 시뮬레이션을 진행하도록 양쪽 창 상태를 교환하고 권한을 인계한다. */
+function updateWindowActivity(){
+  localWindowActive=currentWindowActive();
+  if(!isNetworkGame()||!started)return;
+  sendPresence();
+  evaluateAuthorityState();
 }
-document.addEventListener("visibilitychange",updateHostWindowPause);
-addEventListener("blur",updateHostWindowPause);
+document.addEventListener("visibilitychange",updateWindowActivity);
+addEventListener("blur",updateWindowActivity);
 addEventListener("blur",()=>{minimapDragging=false;mouse.down=false;mouse.drag=false;});
-addEventListener("focus",updateHostWindowPause);
+addEventListener("focus",updateWindowActivity);
 
 /* =========================
    렌더링
@@ -2994,7 +3266,7 @@ function lerpAngle(from,to,k){return from+angleDelta(from,to)*k;}
 function lerpRenderEntities(dt){
   const positionK=1-Math.pow(.001,dt),rotationK=1-Math.pow(.00002,dt);
   for(const e of [...units,...buildings]){
-    if(role==="guest"){
+    if(isNetworkGame()&&!localIsAuthority()){
       e.renderX+=(e.x-e.renderX)*positionK;
       e.renderY+=(e.y-e.renderY)*positionK;
     }
@@ -3009,7 +3281,7 @@ function lerpRenderEntities(dt){
   }
 }
 function displayPos(e){
-  if(role==="guest")return{x:e.renderX??e.x,y:e.renderY??e.y};
+  if(isNetworkGame()&&!localIsAuthority())return{x:e.renderX??e.x,y:e.renderY??e.y};
   return{x:e.x,y:e.y};
 }
 function drawHealth(e,sx,sy,w){
@@ -3174,7 +3446,7 @@ function drawUnit(u){
   }
 }
 function drawProjectiles(){
-  if(role==="guest")return; // 게스트 스냅샷에는 투사체를 생략해 네트워크를 가볍게 유지
+  if(isNetworkGame()&&!localIsAuthority())return; // 비권한 화면은 동기화된 발사 효과만 표시
   for(const p of projectiles){
     if(p.team!==localTeam&&!pointVisibleTo(localTeam,p.x,p.y))continue;
     const s=worldToScreen(p.x,p.y),previous=worldToScreen(p.prevX??p.x,p.prevY??p.y);
@@ -3592,11 +3864,12 @@ let last=performance.now();
 function loop(now){
   const dt=Math.min((now-last)/1000,.04);last=now;
   flushGuestSnapshot();
+  maintainAuthorityProtocol(now);
   updateCamera(dt);
   lerpRenderEntities(dt);
 
-  const authoritative = role==="host"||role==="solo";
-  if(started&&authoritative&&!gameOver&&!gamePaused){
+  const authoritative=localIsAuthority();
+  if(started&&authoritative&&!authoritySyncing&&!gameOver&&!gamePaused){
     const nowSec=now/1000;
     beginNavigationFrame(now);
     updateUnits(dt,nowSec);
@@ -3608,9 +3881,9 @@ function loop(now){
     checkGameOver();
   }
   if(authoritative)updateFloating(dt);
-  if(role==="guest"&&started&&!gamePaused)updateGuestInteractionEffects(dt);
+  if(isNetworkGame()&&!authoritative&&started&&!gamePaused)updateGuestInteractionEffects(dt);
   if(!gamePaused)updateVisualEffects(dt);
-  if(role==="host")sendSnapshot(false);
+  if(isNetworkGame()&&authoritative)sendSnapshot(false);
   draw();
   requestAnimationFrame(loop);
 }

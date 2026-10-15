@@ -15,12 +15,97 @@
     user-select:none;
   }
   #game { position:fixed; inset:0; width:100vw; height:100vh; display:block; background:#101418; }
-  #help {
-    position:fixed; left:12px; top:12px; z-index:4;
-    padding:9px 11px; border:1px solid rgba(255,255,255,.12);
-    border-radius:8px; background:rgba(7,10,13,.78); color:#dce8ef;
-    font-size:12px; line-height:1.55; pointer-events:none;
-    backdrop-filter:blur(4px);
+  #topControls {
+    position:fixed; left:12px; top:12px; z-index:16;
+    display:flex; align-items:center; gap:7px;
+  }
+  #topControls button {
+    padding:7px 10px; border:1px solid rgba(255,255,255,.15); border-radius:8px;
+    background:rgba(7,10,13,.80); color:white; cursor:pointer; font-weight:700;
+  }
+  .infoModal {
+    position:fixed; inset:0; z-index:14; display:none;
+    align-items:center; justify-content:center; padding:64px 24px 24px;
+    background:rgba(3,7,10,.78); backdrop-filter:blur(7px);
+  }
+  .infoModal.show { display:flex; }
+  .infoPanel {
+    width:min(1000px,calc(100vw - 40px)); max-height:calc(100vh - 92px); overflow:auto;
+    padding:0 26px 28px; border:1px solid rgba(125,211,255,.28); border-radius:16px;
+    background:linear-gradient(155deg,rgba(22,31,38,.98),rgba(10,15,19,.98)); color:#e6f1f6;
+    box-shadow:0 22px 80px rgba(0,0,0,.65),0 0 35px rgba(68,179,238,.12);
+    scrollbar-color:#4c758d #10171c;
+  }
+  .infoHeader {
+    position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:18px;
+    margin:0 -26px 22px; padding:20px 26px 16px; border-bottom:1px solid rgba(255,255,255,.1);
+    background:rgba(18,26,32,.96); backdrop-filter:blur(7px);
+  }
+  .infoHeader h2 { margin:0; font-size:25px; color:#f3fbff; }
+  .infoHeader p { margin:4px 0 0; color:#9fb4c0; font-size:13px; }
+  .modalClose { flex:none; padding:8px 12px; background:#29343b; }
+  .guideGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+  .guideSection { padding:18px; border:1px solid rgba(255,255,255,.1); border-radius:12px; background:rgba(255,255,255,.035); }
+  .guideSection h3 { margin:0 0 12px; color:#8fd9ff; font-size:17px; }
+  .guideRow { display:grid; grid-template-columns:minmax(125px,.72fr) 1.28fr; gap:14px; padding:8px 0; border-top:1px solid rgba(255,255,255,.07); }
+  .guideRow:first-of-type { border-top:0; }
+  .guideRow strong { color:#fff; font-size:13px; }
+  .guideRow span { color:#bac9d1; font-size:13px; line-height:1.45; }
+  kbd { display:inline-block; min-width:25px; margin:0 2px; padding:2px 6px; text-align:center; border:1px solid #547184; border-bottom-width:2px; border-radius:5px; background:#17232b; color:#cdefff; font:700 12px ui-monospace,Consolas,monospace; }
+  #encyclopediaPanel { width:min(1200px,calc(100vw - 40px)); }
+  .infoHeaderActions { display:flex; align-items:center; gap:8px; }
+  #encyclopediaBackBtn { display:none; background:#244153; border-color:#5687a1; }
+  #encyclopediaBackBtn.show { display:block; }
+  .codexNotice { margin:0 0 22px; padding:12px 14px; border-left:3px solid #6bc8f5; border-radius:5px; background:rgba(64,164,214,.1); color:#bdd5e1; font-size:13px; line-height:1.5; }
+  .codexView { display:none; }
+  .codexView.show { display:block; }
+  .codexCategoryGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; max-width:820px; margin:34px auto; }
+  .codexCategoryButton { min-height:190px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; border-color:rgba(117,208,255,.34); background:linear-gradient(145deg,#243b49,#17242c); }
+  .codexCategoryButton:hover { border-color:#76d2ff; background:linear-gradient(145deg,#2e5267,#1b303c); }
+  .codexCategoryIcon { font-size:48px; line-height:1; }
+  .codexCategoryButton strong { font-size:23px; }
+  .codexCategoryButton small { color:#a6bbc6; font-size:13px; }
+  .codexListHeader { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin:0 0 16px; }
+  .codexListHeader h3 { margin:0; color:#8fd9ff; font-size:21px; }
+  .codexListHeader span { color:#8ea3ae; font-size:13px; }
+  .codexEntryGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(154px,1fr)); gap:14px; }
+  .codexEntryCard { height:172px; padding:10px; display:flex; flex-direction:column; align-items:stretch; gap:9px; border-color:rgba(255,255,255,.12); background:rgba(255,255,255,.035); transition:.14s ease; }
+  .codexEntryCard:hover { border-color:#71cfff; background:rgba(72,153,195,.14); transform:translateY(-2px); }
+  .codexPortrait { width:100%; height:122px; display:block; border-radius:8px; background:radial-gradient(circle at 50% 45%,#243945,#111a20 72%); }
+  .codexEntryName { overflow:hidden; color:#f2f9fc; font-size:14px; font-weight:800; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
+  #codexDetailContent { max-width:820px; margin:0 auto; }
+  #codexDetailContent .codexCard { background:rgba(255,255,255,.045); }
+  .codexDetailPortrait { width:100%; height:210px; display:block; border-bottom:1px solid rgba(255,255,255,.09); background:radial-gradient(circle at 50% 45%,#284250,#10191f 72%); }
+  .codexSection + .codexSection { margin-top:30px; padding-top:24px; border-top:1px solid rgba(255,255,255,.12); }
+  .codexSectionTitle { display:flex; align-items:baseline; gap:10px; margin:0 0 14px; }
+  .codexSectionTitle h3 { margin:0; font-size:21px; color:#8fd9ff; }
+  .codexSectionTitle span { color:#8196a2; font-size:12px; }
+  .codexGrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px; align-items:start; }
+  .codexCard { overflow:hidden; border:1px solid rgba(255,255,255,.11); border-radius:12px; background:rgba(255,255,255,.035); }
+  .codexCardHeader { padding:15px 16px 12px; border-bottom:1px solid rgba(255,255,255,.09); background:rgba(63,116,145,.12); }
+  .codexCardHeader h4 { margin:0; color:#fff; font-size:18px; }
+  .codexCardHeader small { color:#839ba8; font:11px ui-monospace,Consolas,monospace; }
+  .codexGroup { padding:12px 16px; border-bottom:1px solid rgba(255,255,255,.07); }
+  .codexGroup:last-child { border-bottom:0; }
+  .codexGroup h5 { margin:0 0 8px; color:#73c7ef; font-size:12px; letter-spacing:.04em; }
+  .codexStats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px 16px; margin:0; }
+  .codexStat { display:flex; justify-content:space-between; gap:12px; min-width:0; font-size:12px; }
+  .codexStat dt { color:#92a5af; }
+  .codexStat dd { margin:0; color:#eef8fc; text-align:right; font-weight:700; overflow-wrap:anywhere; }
+  .codexTrait { margin:0; color:#c5d4db; font-size:12px; line-height:1.55; }
+  .codexTrait + .codexTrait { margin-top:6px; }
+  @media (max-width:720px) {
+    .infoModal { padding:58px 10px 10px; }
+    .infoPanel,#encyclopediaPanel { width:100%; max-height:calc(100vh - 68px); padding:0 15px 20px; }
+    .infoHeader { margin:0 -15px 16px; padding:15px; }
+    .guideGrid { grid-template-columns:1fr; }
+    .codexGrid { grid-template-columns:1fr; }
+    .codexStats { grid-template-columns:1fr; }
+    .codexCategoryGrid { grid-template-columns:1fr; margin:16px auto; }
+    .codexCategoryButton { min-height:125px; }
+    .codexEntryGrid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
+    .codexEntryCard { height:148px; }
+    .codexPortrait { height:99px; }
   }
   #status {
     position:fixed; right:12px; top:12px; z-index:5;
@@ -29,7 +114,7 @@
     background:rgba(7,10,13,.80); color:#eaf2f7; font-size:12px;
   }
   #status strong { color:#fff; }
-  #fullscreenBtn, #resetGuestBtn {
+  #resetGuestBtn {
     position:fixed; right:12px; top:82px; z-index:5;
     border:1px solid rgba(255,255,255,.15); border-radius:8px;
     padding:7px 10px; background:rgba(7,10,13,.80); color:white;
@@ -51,9 +136,18 @@
     color:#edffff; border-color:#6de4ff; background:rgba(18,77,96,.94);
     box-shadow:0 0 8px rgba(75,216,255,.58),inset 0 0 8px rgba(119,232,255,.12);
   }
-  #fullscreenBtn.locked {
+  #fullscreenBtn.locked, #guideBtn.active, #encyclopediaBtn.active {
     color:#e9fbff; border-color:#6de4ff; background:rgba(18,77,96,.92);
     box-shadow:0 0 8px rgba(75,216,255,.95),0 0 20px rgba(75,216,255,.58),inset 0 0 10px rgba(119,232,255,.18);
+  }
+  #gameOverActions {
+    position:fixed; left:50%; top:calc(50% + 58px); z-index:15;
+    display:none; transform:translateX(-50%);
+  }
+  #gameOverActions.show { display:block; }
+  #returnMenuBtn {
+    min-width:210px; padding:12px 20px; border-color:#79c9ff;
+    background:#284f68; box-shadow:0 0 18px rgba(74,185,255,.28);
   }
   #lobby {
     position:fixed; inset:0; z-index:20;
@@ -109,26 +203,83 @@
 <body>
 <canvas id="game"></canvas>
 
-<div id="help">
-  <b>조작</b><br>
-  좌클릭 / 드래그: 선택<br>
-  우클릭: 이동 · 대상 명령<br>
-  A → 좌클릭: 공격이동<br>
-  S: 선택 유닛 정지<br>
-  일꾼 Z/X/C: 생산·방어·자원 건설 분류 · 이후 Z~B: 건물 선택<br>
-  생산건물 Z~B: 유닛 생산<br>
-  Shift: 건설 분류로 돌아가기<br>
-  P: 전체화면 + 마우스 잠금 켜기/끄기<br>
-  1~0: 부대 선택<br>
-  Shift + 1~0: 선택 유닛을 부대에 추가<br>
-  Ctrl + 1~0: 선택 유닛으로 부대 덮어쓰기<br>
-  일꾼으로 아군 자원 우클릭: 채집<br>
-  화면 가장자리: 카메라 이동<br>
-  전체화면: 마우스 잠금 · Esc로 해제
+<div id="topControls">
+  <button id="fullscreenBtn">마우스 잠금 (P)</button>
+  <button id="guideBtn">조작 설명 (O)</button>
+  <button id="encyclopediaBtn">도감 (I)</button>
+</div>
+
+<div id="help" class="infoModal" aria-hidden="true">
+  <div class="infoPanel" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+    <div class="infoHeader">
+      <div><h2 id="guideTitle">조작 가이드</h2><p><kbd>O</kbd> 키로 언제든 열고 닫을 수 있습니다.</p></div>
+      <button id="guideCloseBtn" class="modalClose">닫기 (O)</button>
+    </div>
+    <div class="guideGrid">
+      <section class="guideSection">
+        <h3>선택과 이동</h3>
+        <div class="guideRow"><strong>좌클릭</strong><span>유닛 또는 건물 하나를 선택합니다.</span></div>
+        <div class="guideRow"><strong>좌클릭 드래그</strong><span>범위 안의 아군 유닛을 한꺼번에 선택합니다.</span></div>
+        <div class="guideRow"><strong>우클릭</strong><span>이동하거나 대상에 맞는 공격·채집·반납·건설 지원·회복 명령을 내립니다.</span></div>
+        <div class="guideRow"><strong>마우스 휠</strong><span>현재 커서 위치를 기준으로 화면을 확대하거나 축소합니다.</span></div>
+        <div class="guideRow"><strong>화면 가장자리</strong><span>커서를 가장자리로 옮겨 카메라를 이동합니다.</span></div>
+      </section>
+      <section class="guideSection">
+        <h3>전투 명령</h3>
+        <div class="guideRow"><strong><kbd>A</kbd> → 좌클릭</strong><span>지점까지 이동하며 만나는 적을 공격합니다. 적을 직접 누르면 집중 공격합니다.</span></div>
+        <div class="guideRow"><strong>적 우클릭</strong><span>선택한 전투 유닛이 해당 적을 집중 공격합니다.</span></div>
+        <div class="guideRow"><strong><kbd>S</kbd></strong><span>선택한 유닛의 현재 명령을 즉시 정지합니다.</span></div>
+      </section>
+      <section class="guideSection">
+        <h3>부대 지정</h3>
+        <div class="guideRow"><strong><kbd>1</kbd>~<kbd>0</kbd></strong><span>저장된 부대를 선택하고 해당 위치로 카메라를 이동합니다.</span></div>
+        <div class="guideRow"><strong><kbd>Shift</kbd> + 숫자</strong><span>현재 선택한 유닛을 기존 부대에 추가합니다.</span></div>
+        <div class="guideRow"><strong><kbd>Ctrl</kbd> + 숫자</strong><span>현재 선택한 유닛으로 해당 부대를 덮어씁니다.</span></div>
+      </section>
+      <section class="guideSection">
+        <h3>건설과 생산</h3>
+        <div class="guideRow"><strong>일꾼 <kbd>Z</kbd>/<kbd>X</kbd>/<kbd>C</kbd></strong><span>생산·방어·자원 건물 분류를 선택합니다.</span></div>
+        <div class="guideRow"><strong>분류 후 <kbd>Z</kbd>~<kbd>B</kbd></strong><span>표시된 순서에 맞춰 건물을 선택한 뒤 지면을 좌클릭해 배치합니다.</span></div>
+        <div class="guideRow"><strong>생산건물 <kbd>Z</kbd>~<kbd>B</kbd></strong><span>선택한 생산건물에서 표시된 순서의 유닛을 생산합니다.</span></div>
+        <div class="guideRow"><strong><kbd>Shift</kbd></strong><span>세부 건설 목록에서 건설 분류 화면으로 돌아갑니다.</span></div>
+        <div class="guideRow"><strong>자원 우클릭</strong><span>선택한 일꾼에게 채집 명령을 내립니다.</span></div>
+      </section>
+      <section class="guideSection">
+        <h3>화면과 정보</h3>
+        <div class="guideRow"><strong><kbd>P</kbd></strong><span>전체화면과 마우스 잠금을 켜거나 끕니다. 잠금 상태는 주황색 커서로 표시됩니다.</span></div>
+        <div class="guideRow"><strong><kbd>O</kbd></strong><span>이 조작 가이드를 열거나 닫습니다.</span></div>
+        <div class="guideRow"><strong><kbd>I</kbd></strong><span>모든 유닛과 건물의 상세 도감을 열거나 닫습니다.</span></div>
+        <div class="guideRow"><strong><kbd>Esc</kbd></strong><span>브라우저의 전체화면 또는 마우스 잠금을 해제합니다.</span></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div id="encyclopedia" class="infoModal" aria-hidden="true">
+  <div id="encyclopediaPanel" class="infoPanel" role="dialog" aria-modal="true" aria-labelledby="encyclopediaTitle">
+    <div class="infoHeader">
+      <div><h2 id="encyclopediaTitle">유닛 · 건물 도감</h2><p><kbd>I</kbd> 열기/닫기 · <kbd>Shift</kbd> 뒤로가기</p></div>
+      <div class="infoHeaderActions">
+        <button id="encyclopediaBackBtn">← 뒤로 (Shift)</button>
+        <button id="encyclopediaCloseBtn" class="modalClose">닫기 (I)</button>
+      </div>
+    </div>
+    <p id="codexNotice" class="codexNotice">피해와 사거리는 기본 수치이며, 상성 및 고유 효과는 각 카드의 상세 정보에 표시됩니다.</p>
+    <div id="codexCategoryView" class="codexView show">
+      <div class="codexCategoryGrid">
+        <button class="codexCategoryButton" data-codex-kind="unit"><span class="codexCategoryIcon">◆</span><strong>유닛</strong><small id="unitCodexCount"></small></button>
+        <button class="codexCategoryButton" data-codex-kind="building"><span class="codexCategoryIcon">▦</span><strong>건물</strong><small id="buildingCodexCount"></small></button>
+      </div>
+    </div>
+    <div id="codexListView" class="codexView">
+      <div class="codexListHeader"><h3 id="codexListTitle"></h3><span id="codexListCount"></span></div>
+      <div id="codexEntryList" class="codexEntryGrid"></div>
+    </div>
+    <div id="codexDetailView" class="codexView"><div id="codexDetailContent"></div></div>
+  </div>
 </div>
 
 <div id="status">네트워크: <strong id="netText">대기</strong><br>진영: <span id="teamText">-</span><br>맵: <span id="mapText">-</span></div>
-<button id="fullscreenBtn">전체화면 + 마우스 잠금</button>
 <button id="resetGuestBtn">게스트 자리 초기화</button>
 <div id="practiceTools">
   <strong>연습모드 설정</strong>
@@ -136,6 +287,7 @@
   <button id="instantBuildBtn">생산·건설 대기시간 없음: 꺼짐</button>
 </div>
 <div id="pauseBanner">호스트 창 비활성화 · 게임 일시정지</div>
+<div id="gameOverActions"><button id="returnMenuBtn">메인메뉴로 돌아가기</button></div>
 
 <div id="lobby">
   <div class="card">
@@ -182,7 +334,27 @@ const inviteWrap = document.getElementById("inviteWrap");
 const invite = document.getElementById("invite");
 const copyBtn = document.getElementById("copyBtn");
 const fullscreenBtn = document.getElementById("fullscreenBtn");
+const guideBtn = document.getElementById("guideBtn");
+const help = document.getElementById("help");
+const guideCloseBtn = document.getElementById("guideCloseBtn");
+const encyclopediaBtn = document.getElementById("encyclopediaBtn");
+const encyclopedia = document.getElementById("encyclopedia");
+const encyclopediaPanel = document.getElementById("encyclopediaPanel");
+const encyclopediaCloseBtn = document.getElementById("encyclopediaCloseBtn");
+const encyclopediaBackBtn = document.getElementById("encyclopediaBackBtn");
+const codexCategoryView = document.getElementById("codexCategoryView");
+const codexListView = document.getElementById("codexListView");
+const codexDetailView = document.getElementById("codexDetailView");
+const codexListTitle = document.getElementById("codexListTitle");
+const codexListCount = document.getElementById("codexListCount");
+const codexEntryList = document.getElementById("codexEntryList");
+const codexDetailContent = document.getElementById("codexDetailContent");
+const unitCodexCount = document.getElementById("unitCodexCount");
+const buildingCodexCount = document.getElementById("buildingCodexCount");
+const codexNotice = document.getElementById("codexNotice");
 const resetGuestBtn = document.getElementById("resetGuestBtn");
+const gameOverActions = document.getElementById("gameOverActions");
+const returnMenuBtn = document.getElementById("returnMenuBtn");
 const practiceTools = document.getElementById("practiceTools");
 const infiniteResourcesBtn = document.getElementById("infiniteResourcesBtn");
 const instantBuildBtn = document.getElementById("instantBuildBtn");
@@ -225,11 +397,43 @@ async function toggleFullscreenAndPointerLock(){
 }
 function updateFullscreenButton(){
   fullscreenBtn.classList.toggle("locked",document.pointerLockElement===canvas);
-  if(!document.fullscreenElement)fullscreenBtn.textContent="전체화면 + 마우스 잠금";
-  else if(document.pointerLockElement===canvas)fullscreenBtn.textContent="마우스 잠김 · Esc 해제";
-  else fullscreenBtn.textContent="마우스 다시 잠금";
+  if(!document.fullscreenElement)fullscreenBtn.textContent="마우스 잠금 (P)";
+  else if(document.pointerLockElement===canvas)fullscreenBtn.textContent="마우스 잠김 (P) · Esc 해제";
+  else fullscreenBtn.textContent="마우스 다시 잠금 (P)";
 }
 fullscreenBtn.onclick=toggleFullscreenAndPointerLock;
+function setGuideVisible(visible){
+  if(visible){
+    encyclopedia.classList.remove("show");encyclopedia.setAttribute("aria-hidden","true");
+    encyclopediaBtn.classList.remove("active");
+    if(document.pointerLockElement===canvas)document.exitPointerLock?.();
+  }
+  help.classList.toggle("show",visible);
+  help.setAttribute("aria-hidden",String(!visible));
+  guideBtn.classList.toggle("active",visible);
+}
+function toggleGuide(){setGuideVisible(!help.classList.contains("show"));}
+function setEncyclopediaVisible(visible){
+  if(visible){
+    renderEncyclopedia();
+    showCodexCategories();
+    help.classList.remove("show");help.setAttribute("aria-hidden","true");guideBtn.classList.remove("active");
+    if(document.pointerLockElement===canvas)document.exitPointerLock?.();
+  }
+  encyclopedia.classList.toggle("show",visible);
+  encyclopedia.setAttribute("aria-hidden",String(!visible));
+  encyclopediaBtn.classList.toggle("active",visible);
+}
+function toggleEncyclopedia(){setEncyclopediaVisible(!encyclopedia.classList.contains("show"));}
+function infoModalOpen(){return help.classList.contains("show")||encyclopedia.classList.contains("show");}
+guideBtn.onclick=toggleGuide;
+guideCloseBtn.onclick=()=>setGuideVisible(false);
+encyclopediaBtn.onclick=toggleEncyclopedia;
+encyclopediaCloseBtn.onclick=()=>setEncyclopediaVisible(false);
+encyclopediaBackBtn.onclick=navigateCodexBack;
+for(const button of encyclopedia.querySelectorAll("[data-codex-kind]"))button.onclick=()=>showCodexList(button.dataset.codexKind);
+help.addEventListener("mousedown",event=>{if(event.target===help)setGuideVisible(false);});
+encyclopedia.addEventListener("mousedown",event=>{if(event.target===encyclopedia)setEncyclopediaVisible(false);});
 document.addEventListener("fullscreenchange",()=>{
   if(!document.fullscreenElement){
     navigator.keyboard?.unlock?.();
@@ -464,11 +668,204 @@ const BUILDING_TYPES = {
   resourceDepot:{name:"자원창고",hp:600,radius:34,vision:260,cost:90,build:6,produces:[],resourceDropoff:true}
 };
 
+const CODEX_ARMOR_NAMES={human:"인간",heavy:"중장갑",air:"공중"};
+const CODEX_LAYER_NAMES={ground:"지상",air:"공중"};
+const CODEX_TARGET_NAMES={ground:"지상",air:"공중"};
+let encyclopediaRendered=false;
+function codexNumber(value,digits=2){
+  const number=Number(value);
+  if(!Number.isFinite(number))return String(value);
+  return Number.isInteger(number)?String(number):number.toFixed(digits).replace(/0+$/,"").replace(/\.$/,"");
+}
+function codexTypeName(type){return UNIT_TYPES[type]?.name||BUILDING_TYPES[type]?.name||type;}
+function codexTargets(targets){return Array.isArray(targets)&&targets.length?targets.map(target=>CODEX_TARGET_NAMES[target]||target).join(" · "):"공격 불가";}
+function codexRawValue(value){
+  if(Array.isArray(value))return value.length?value.map(codexTypeName).join(", "):"없음";
+  if(typeof value==="boolean")return value?"예":"아니오";
+  return codexNumber(value);
+}
+function appendCodexGroup(card,title,rows){
+  const visible=rows.filter(row=>row&&row[1]!==undefined&&row[1]!==null&&row[1]!=="");
+  if(!visible.length)return;
+  const group=document.createElement("section");group.className="codexGroup";
+  const heading=document.createElement("h5");heading.textContent=title;group.appendChild(heading);
+  const list=document.createElement("dl");list.className="codexStats";
+  for(const [label,value] of visible){
+    const item=document.createElement("div");item.className="codexStat";
+    const term=document.createElement("dt");term.textContent=label;
+    const detail=document.createElement("dd");detail.textContent=String(value);
+    item.append(term,detail);list.appendChild(item);
+  }
+  group.appendChild(list);card.appendChild(group);
+}
+function appendCodexTraits(card,traits){
+  const visible=traits.filter(Boolean);if(!visible.length)return;
+  const group=document.createElement("section");group.className="codexGroup";
+  const heading=document.createElement("h5");heading.textContent="특성 · 운용 규칙";group.appendChild(heading);
+  for(const traitText of visible){const trait=document.createElement("p");trait.className="codexTrait";trait.textContent=traitText;group.appendChild(trait);}
+  card.appendChild(group);
+}
+function codexUnitRules(type,stats){
+  const rules=[];
+  if(stats.special)rules.push(stats.special);
+  if(type==="worker"){
+    rules.push(`채집: 초당 1 자원 · 최대 운반량 5 · 자원 하나당 동시 채집 ${MAX_MINERS_PER_NODE}명`);
+    rules.push("자동 수리: 명령이 없을 때 반경 90 안의 아군 중장갑 유닛 또는 완성 건물을 초당 3 HP 수리");
+    rules.push("건설 가능: 병영, 군수공장, 공항, 지상포탑, 레이더, 공대공 포탑, 자원창고");
+  }
+  if(type==="infantry")rules.push("제압 사격: 4번째 공격마다 기본 피해가 150%로 증가");
+  if(type==="sniper")rules.push("피해 배율: 인간 190% · 중장갑 16% · 기타 45%");
+  if(type==="antitank")rules.push("피해 배율: 중장갑 250% · 인간 50% · 기타 25%");
+  if(type==="antiair")rules.push("피해 배율: 공중 400% · 비공중 22%");
+  if(stats.splashRadius)rules.push(`스플래시: 반경 ${codexNumber(stats.splashRadius)} 안의 지상 적에게 기본 피해의 ${codexNumber((stats.splashFactor||0)*100)}% 적용`);
+  if(stats.healRate)rules.push(`단일 회복: 초당 ${codexNumber(stats.healRate)} HP · 회복 사거리 ${codexNumber(stats.healRange)} · 인간 유닛 전용`);
+  if(stats.fireWhileMoving)rules.push("이동 사격 가능: 차량부는 이동 방향, 포신은 공격 방향을 바라봄");
+  if(stats.cloaked)rules.push("상시 클로킹: 적 탐지 범위 안에서만 노출");
+  if(stats.layer==="air")rules.push("공중 이동: 벽, 언덕, 물, 공허와 지상 충돌을 무시하고 이동");
+  if(type==="radarVehicle")rules.push("시야는 벽과 언덕에 차단되지만 탐지는 반경 안의 클로킹 유닛에 적용");
+  return rules;
+}
+function codexBuildingRules(type,stats){
+  const rules=[];
+  if(stats.resourceDropoff)rules.push("자원 반납 지점: 일꾼이 운반 중인 자원을 반납하고 기존 채집 루프를 계속할 수 있음");
+  if(stats.unobstructedVision)rules.push("비차단 시야: 벽과 언덕의 시야 가림을 무시");
+  if(stats.detection)rules.push(`클로킹 탐지: 반경 ${codexNumber(stats.detection)} 안의 클로킹 유닛을 탐지`);
+  if(stats.targets?.length)rules.push(`${projectileEffectKind(type)==="shell"?"포탄":"총탄"} 공격 · ${codexTargets(stats.targets)} 대상 전용`);
+  if(type==="hq")rules.push("시작 건물: 일꾼만 생산 가능하며 파괴되면 패배");
+  return rules;
+}
+function createCodexCard(type,stats,kind,includePortrait=false){
+  const card=document.createElement("article");card.className="codexCard";
+  const header=document.createElement("header");header.className="codexCardHeader";
+  const name=document.createElement("h4");name.textContent=stats.name;
+  const id=document.createElement("small");id.textContent=type;header.append(name,id);card.appendChild(header);
+  if(includePortrait){
+    const portrait=document.createElement("canvas");portrait.className="codexDetailPortrait";
+    portrait.width=1000;portrait.height=260;card.appendChild(portrait);drawCodexPortrait(portrait,type,kind);
+  }
+  const used=new Set(["name","special"]),take=(key,label,format=value=>codexNumber(value))=>{
+    if(!Object.prototype.hasOwnProperty.call(stats,key))return null;
+    used.add(key);return[label,format(stats[key])];
+  };
+  if(kind==="unit"){
+    appendCodexGroup(card,"핵심 정보",[
+      take("hp","체력",value=>`${codexNumber(value)} HP`),
+      take("damage","기본 피해",value=>value?codexNumber(value):"0 · 비전투"),
+      take("range","공격 사거리",value=>value?codexNumber(value):"0 · 공격 불가"),
+      take("speed","이동 속도",value=>`${codexNumber(value)} /초`)
+    ]);
+    const dps=stats.damage>0&&stats.reload>0?stats.damage/stats.reload:0;
+    appendCodexGroup(card,"전투 · 능력",[
+      take("reload","공격 주기",value=>stats.damage>0?`${codexNumber(value)}초`:`${codexNumber(value)}초 · 공격 없음`),
+      ["기본 DPS",dps?codexNumber(dps):"0"],
+      take("targets","공격 대상",codexTargets),
+      take("healRate","초당 회복",value=>`${codexNumber(value)} HP`),
+      take("healRange","회복 사거리"),
+      take("splashRadius","스플래시 반경"),
+      take("splashFactor","주변 피해",value=>`${codexNumber(value*100)}%`)
+    ]);
+    const producers=Object.values(BUILDING_TYPES).filter(building=>building.produces?.includes(type)).map(building=>building.name);
+    appendCodexGroup(card,"시야 · 생산",[
+      take("vision","시야"),take("detection","탐지 범위"),
+      take("cost","생산 비용",value=>`${codexNumber(value)} 자원`),
+      take("build","생산 시간",value=>`${codexNumber(value)}초`),
+      ["생산 건물",producers.join(", ")||"생산 불가"]
+    ]);
+    appendCodexGroup(card,"분류 · 물리",[
+      take("armor","방어 유형",value=>CODEX_ARMOR_NAMES[value]||value),
+      take("layer","이동 유형",value=>CODEX_LAYER_NAMES[value]||value),
+      take("radius","충돌 반경"),
+      take("fireWhileMoving","이동 사격",value=>value?"가능":"불가"),
+      take("cloaked","클로킹",value=>value?"상시":"없음")
+    ]);
+    appendCodexTraits(card,codexUnitRules(type,stats));
+  }else{
+    const category=type==="hq"?"시작 건물":["barracks","factory","airport"].includes(type)?"생산 건물":["resourceDepot"].includes(type)?"자원 건물":"방어 건물";
+    appendCodexGroup(card,"핵심 정보",[
+      take("hp","체력",value=>`${codexNumber(value)} HP`),
+      take("cost","건설 비용",value=>`${codexNumber(value)} 자원`),
+      take("build","건설 시간",value=>value?`${codexNumber(value)}초`:"시작 시 완성"),
+      take("vision","시야")
+    ]);
+    const dps=stats.damage>0&&stats.reload>0?stats.damage/stats.reload:0;
+    for(const key of ["damage","range","reload","targets","detection","unobstructedVision","produces","resourceDropoff"])
+      if(Object.prototype.hasOwnProperty.call(stats,key))used.add(key);
+    appendCodexGroup(card,"전투 · 탐지",[
+      ["기본 피해",stats.damage!==undefined?codexNumber(stats.damage):"없음"],
+      ["공격 사거리",stats.range!==undefined?codexNumber(stats.range):"없음"],
+      ["공격 주기",stats.reload!==undefined?`${codexNumber(stats.reload)}초`:"없음"],
+      ["기본 DPS",dps?codexNumber(dps):"0 · 공격 불가"],
+      ["공격 대상",stats.targets?codexTargets(stats.targets):"공격 불가"],
+      ["탐지 범위",stats.detection!==undefined?codexNumber(stats.detection):"없음"],
+      ["시야 차단",stats.unobstructedVision?"지형 무시":"벽·언덕 적용"]
+    ]);
+    appendCodexGroup(card,"생산 · 기능",[
+      ["생산 유닛",stats.produces?.length?stats.produces.map(codexTypeName).join(", "):"없음"],
+      ["건물 분류",category],
+      ["자원 반납",stats.resourceDropoff?"가능":"불가"]
+    ]);
+    appendCodexGroup(card,"분류 · 물리",[
+      ["방어 유형","중장갑"],["배치 유형","지상"],take("radius","충돌 반경")
+    ]);
+    appendCodexTraits(card,codexBuildingRules(type,stats));
+  }
+  const extraRows=Object.entries(stats).filter(([key])=>!used.has(key)).map(([key,value])=>[key,codexRawValue(value)]);
+  appendCodexGroup(card,"추가 데이터",extraRows);
+  return card;
+}
+function renderEncyclopedia(){
+  if(encyclopediaRendered)return;
+  encyclopediaRendered=true;
+  unitCodexCount.textContent=`${Object.keys(UNIT_TYPES).length}종`;
+  buildingCodexCount.textContent=`${Object.keys(BUILDING_TYPES).length}종`;
+  codexNotice.textContent=`전체 유닛 인구 제한은 ${POP_CAP}입니다. 피해와 사거리는 기본 수치이며, 지상 대상은 언덕 위에서 받는 피해가 ${codexNumber((1-HILL_DAMAGE_MULT)*100)}% 감소합니다. 상성과 고유 효과는 각 카드의 상세 정보에 표시됩니다.`;
+}
+let codexViewState="category",codexSelectedKind=null,codexSelectedType=null;
+function setCodexView(view){
+  codexViewState=view;
+  codexCategoryView.classList.toggle("show",view==="category");
+  codexListView.classList.toggle("show",view==="list");
+  codexDetailView.classList.toggle("show",view==="detail");
+  encyclopediaBackBtn.classList.toggle("show",view!=="category");
+  codexNotice.style.display=view==="detail"?"":"none";
+  encyclopediaPanel.scrollTop=0;
+}
+function showCodexCategories(){
+  codexSelectedKind=null;codexSelectedType=null;setCodexView("category");
+}
+function createCodexEntryCard(type,stats,kind){
+  const button=document.createElement("button");button.type="button";button.className="codexEntryCard";
+  const portrait=document.createElement("canvas");portrait.className="codexPortrait";portrait.width=300;portrait.height=210;
+  const name=document.createElement("span");name.className="codexEntryName";name.textContent=stats.name;
+  button.append(portrait,name);button.onclick=()=>showCodexDetail(kind,type);
+  drawCodexPortrait(portrait,type,kind);
+  return button;
+}
+function showCodexList(kind){
+  const source=kind==="unit"?UNIT_TYPES:kind==="building"?BUILDING_TYPES:null;if(!source)return;
+  codexSelectedKind=kind;codexSelectedType=null;codexEntryList.textContent="";
+  codexListTitle.textContent=kind==="unit"?"유닛":"건물";
+  codexListCount.textContent=`${Object.keys(source).length}종 · 카드를 선택하면 상세 정보 표시`;
+  for(const [type,stats] of Object.entries(source))codexEntryList.appendChild(createCodexEntryCard(type,stats,kind));
+  setCodexView("list");
+}
+function showCodexDetail(kind,type){
+  const source=kind==="unit"?UNIT_TYPES:BUILDING_TYPES,stats=source?.[type];if(!stats)return;
+  codexSelectedKind=kind;codexSelectedType=type;codexDetailContent.textContent="";
+  codexDetailContent.appendChild(createCodexCard(type,stats,kind,true));setCodexView("detail");
+}
+function navigateCodexBack(){
+  if(codexViewState==="detail"&&codexSelectedKind)showCodexList(codexSelectedKind);
+  else if(codexViewState==="list")showCodexCategories();
+  else setEncyclopediaVisible(false);
+}
+
 let nextId=1;
 let units=[], buildings=[], resourceNodes=[], projectiles=[], floatingTexts=[], visualEffects=[];
 let teamResources=[50,50];
 let gameOver=false, winnerTeam=null, gamePaused=false;
 let started=false;
+let gameOverUiShown=false;
 
 /* =========================
    엔티티
@@ -873,6 +1270,7 @@ function startGuest(hostId){
       if(authenticated)queueHostMessage(msg);
     });
     conn.on("close",()=>{
+      if(conn!==c)return;
       if(pendingGuestSnapshot&&!localIsAuthority())flushGuestSnapshot();
       connected=false; connectionLost=true;
       authoritySyncing=true;gamePaused=true;handoffPending=null;
@@ -1117,6 +1515,41 @@ function startSolo(){
   updatePracticeTools();
   centerCameraForTeam(localTeam);
 }
+
+async function returnToMainMenu(){
+  const previousConn=conn,previousPeer=peer;
+  conn=null;peer=null;role="menu";started=false;connected=false;connectionLost=false;
+  authorityOwner=SIDE_HOST;authorityTerm=1;authoritySyncing=false;handoffPending=null;
+  localWindowActive=currentWindowActive();remoteWindowActive=true;resetSnapshotFlow();
+  processedCommandIds.clear();deferredCommands.length=0;pendingLocalCommands.clear();localCommandSequence=0;
+  if(previousConn)try{previousConn.close();}catch(_){}
+  if(previousPeer)try{previousPeer.destroy();}catch(_){}
+
+  localTeam=TEAM_LEFT;practiceInfiniteResources=false;practiceInstantBuild=false;
+  selectedIds=[];attackMoveMode=false;buildPlacementMode=null;activeBuildCategory=null;buildMenuSelectionKey="";
+  minimapDragging=false;mouse.down=false;mouse.drag=false;
+  for(const group of controlGroups)group.length=0;
+  aiBuildTimer=0;aiWaveTimer=0;
+  resetWorld();
+  gameOverUiShown=false;gameOverActions.classList.remove("show");
+  setGuideVisible(false);setEncyclopediaVisible(false);pauseBanner.classList.remove("show");
+  resetGuestBtn.style.display="none";updatePracticeTools();
+
+  hostBtn.disabled=false;soloBtn.disabled=false;
+  hostBtn.style.display="";soloBtn.style.display="";mapPicker.style.display="";
+  inviteWrap.classList.remove("show");invite.value="";copyBtn.textContent="링크 복사";
+  setMapSelectionLocked(false);renderMapList();
+  setLobbyMessage("방식을 선택하세요.");
+  setMapMessage(`${activeMap.name} 선택됨 · 자원 ${activeMap.resources.length}개`);
+  netText.textContent="대기";teamText.textContent="-";
+  lobby.classList.remove("hidden");
+
+  const cleanUrl=new URL(location.href);
+  cleanUrl.searchParams.delete("join");
+  history.replaceState(null,"",cleanUrl.pathname+cleanUrl.search+cleanUrl.hash);
+  try{await exitFullscreenAndPointerLock();}catch(_){}
+}
+returnMenuBtn.onclick=returnToMainMenu;
 
 copyBtn.onclick=async()=>{
   try{
@@ -2239,6 +2672,128 @@ function finalDamage(attacker,target,base){
 }
 const SHELL_WEAPON_TYPES=new Set(["heavyTank","artillery","antitank","groundTurret","aaTurret","stealthFighter"]);
 function projectileEffectKind(type){return SHELL_WEAPON_TYPES.has(type)?"shell":"bullet";}
+let gameAudioUnlocked=false,audioContext=null,audioMaster=null,audioNoiseBuffer=null,activeSoundVoices=0;
+const SOUND_VOICE_LIMIT=28;
+const soundLastPlayed={shot:0,explosion:0,destruction:0,death:0};
+function ensureAudioContext(){
+  if(!gameAudioUnlocked)return null;
+  const AudioCtor=window.AudioContext||window.webkitAudioContext;
+  if(!AudioCtor)return null;
+  if(!audioContext){
+    audioContext=new AudioCtor();
+    audioMaster=audioContext.createGain();
+    audioMaster.gain.value=.34;
+    audioMaster.connect(audioContext.destination);
+  }
+  if(audioContext.state==="suspended")audioContext.resume().catch(()=>{});
+  return audioContext;
+}
+function unlockGameAudio(){
+  gameAudioUnlocked=true;
+  ensureAudioContext();
+}
+addEventListener("pointerdown",unlockGameAudio,{once:true,capture:true});
+addEventListener("keydown",unlockGameAudio,{once:true,capture:true});
+function getAudioNoiseBuffer(ctx){
+  if(audioNoiseBuffer&&audioNoiseBuffer.sampleRate===ctx.sampleRate)return audioNoiseBuffer;
+  const length=Math.floor(ctx.sampleRate*1.25),buffer=ctx.createBuffer(1,length,ctx.sampleRate);
+  const data=buffer.getChannelData(0);
+  for(let i=0;i<length;i++)data[i]=Math.random()*2-1;
+  audioNoiseBuffer=buffer;
+  return buffer;
+}
+function effectAudibleToLocal(team,x,y){
+  return team===null||team===undefined||team===localTeam||pointVisibleTo(localTeam,x,y);
+}
+function soundOutputFor(x,y,volume=1){
+  const ctx=ensureAudioContext();
+  if(!ctx||!audioMaster||activeSoundVoices>=SOUND_VOICE_LIMIT)return null;
+  const viewWidth=innerWidth/camera.zoom,viewHeight=innerHeight/camera.zoom;
+  const centerX=camera.x+viewWidth/2,centerY=camera.y+viewHeight/2;
+  const distance=Math.hypot(x-centerX,y-centerY),audibleDistance=Math.max(720,Math.hypot(viewWidth,viewHeight)*.72);
+  if(distance>audibleDistance*1.7)return null;
+  const attenuation=Math.max(.07,1-distance/audibleDistance);
+  const gain=ctx.createGain();gain.gain.value=volume*attenuation;
+  if(ctx.createStereoPanner){
+    const panner=ctx.createStereoPanner();
+    panner.pan.value=Math.max(-1,Math.min(1,(x-centerX)/Math.max(1,viewWidth*.5)));
+    gain.connect(panner);panner.connect(audioMaster);
+  }else gain.connect(audioMaster);
+  activeSoundVoices++;
+  let released=false;
+  return{ctx,input:gain,release(){if(!released){released=true;activeSoundVoices=Math.max(0,activeSoundVoices-1);}}};
+}
+function soundCanPlay(key,minInterval,team,x,y){
+  if(!gameAudioUnlocked||!effectAudibleToLocal(team,x,y))return false;
+  const now=performance.now();
+  if(now-(soundLastPlayed[key]||0)<minInterval)return false;
+  soundLastPlayed[key]=now;
+  return true;
+}
+function playShotSound(attacker,kind){
+  if(!soundCanPlay("shot",kind==="shell"?32:18,attacker.team,attacker.x,attacker.y))return;
+  const output=soundOutputFor(attacker.x,attacker.y,kind==="shell"?.72:.46);
+  if(!output)return;
+  const {ctx,input}=output,now=ctx.currentTime;
+  const tone=ctx.createOscillator(),toneGain=ctx.createGain();
+  tone.type=kind==="shell"?"sawtooth":"square";
+  const pitch=(kind==="shell"?105:205)*(.9+Math.random()*.2);
+  tone.frequency.setValueAtTime(pitch,now);
+  tone.frequency.exponentialRampToValueAtTime(kind==="shell"?42:92,now+(kind==="shell"?.14:.055));
+  toneGain.gain.setValueAtTime(kind==="shell"?.38:.22,now);
+  toneGain.gain.exponentialRampToValueAtTime(.001,now+(kind==="shell"?.16:.065));
+  tone.connect(toneGain);toneGain.connect(input);tone.start(now);tone.stop(now+(kind==="shell"?.17:.07));
+  if(kind==="shell"){
+    const noise=ctx.createBufferSource(),filter=ctx.createBiquadFilter(),noiseGain=ctx.createGain();
+    noise.buffer=getAudioNoiseBuffer(ctx);filter.type="bandpass";filter.frequency.value=720;filter.Q.value=.7;
+    noiseGain.gain.setValueAtTime(.22,now);noiseGain.gain.exponentialRampToValueAtTime(.001,now+.13);
+    noise.connect(filter);filter.connect(noiseGain);noiseGain.connect(input);noise.start(now);noise.stop(now+.14);
+  }
+  tone.onended=output.release;
+}
+function playExplosionSound(x,y,team,radius=30){
+  if(!soundCanPlay("explosion",45,team,x,y))return;
+  const scale=Math.max(.75,Math.min(1.35,radius/38)),output=soundOutputFor(x,y,.72*scale);
+  if(!output)return;
+  const {ctx,input}=output,now=ctx.currentTime;
+  const noise=ctx.createBufferSource(),filter=ctx.createBiquadFilter(),noiseGain=ctx.createGain();
+  noise.buffer=getAudioNoiseBuffer(ctx);filter.type="lowpass";filter.frequency.setValueAtTime(1250,now);
+  filter.frequency.exponentialRampToValueAtTime(140,now+.48);
+  noiseGain.gain.setValueAtTime(.72,now);noiseGain.gain.exponentialRampToValueAtTime(.001,now+.52);
+  noise.connect(filter);filter.connect(noiseGain);noiseGain.connect(input);
+  const boom=ctx.createOscillator(),boomGain=ctx.createGain();boom.type="sine";
+  boom.frequency.setValueAtTime(78*scale,now);boom.frequency.exponentialRampToValueAtTime(27,now+.42);
+  boomGain.gain.setValueAtTime(.62,now);boomGain.gain.exponentialRampToValueAtTime(.001,now+.45);
+  boom.connect(boomGain);boomGain.connect(input);boom.start(now);boom.stop(now+.46);
+  noise.start(now);noise.stop(now+.54);noise.onended=output.release;
+}
+function playDestructionSound(entity){
+  if(!soundCanPlay("destruction",70,entity.team,entity.x,entity.y))return;
+  const large=entity.kind==="building",output=soundOutputFor(entity.x,entity.y,large?.95:.72);
+  if(!output)return;
+  const {ctx,input}=output,now=ctx.currentTime;
+  const noise=ctx.createBufferSource(),filter=ctx.createBiquadFilter(),crashGain=ctx.createGain();
+  noise.buffer=getAudioNoiseBuffer(ctx);filter.type="lowpass";filter.frequency.setValueAtTime(1700,now);
+  filter.frequency.exponentialRampToValueAtTime(90,now+(large?.85:.62));
+  crashGain.gain.setValueAtTime(.78,now);crashGain.gain.exponentialRampToValueAtTime(.001,now+(large?.9:.68));
+  noise.connect(filter);filter.connect(crashGain);crashGain.connect(input);
+  const rumble=ctx.createOscillator(),rumbleGain=ctx.createGain();rumble.type="sawtooth";
+  rumble.frequency.setValueAtTime(62,now);rumble.frequency.exponentialRampToValueAtTime(21,now+(large?.72:.5));
+  rumbleGain.gain.setValueAtTime(.48,now);rumbleGain.gain.exponentialRampToValueAtTime(.001,now+(large?.76:.54));
+  rumble.connect(rumbleGain);rumbleGain.connect(input);rumble.start(now);rumble.stop(now+(large?.78:.56));
+  noise.start(now);noise.stop(now+(large?.92:.7));noise.onended=output.release;
+}
+function playDeathSound(entity){
+  if(!soundCanPlay("death",55,entity.team,entity.x,entity.y))return;
+  const output=soundOutputFor(entity.x,entity.y,.42);
+  if(!output)return;
+  const {ctx,input}=output,now=ctx.currentTime;
+  const tone=ctx.createOscillator(),toneGain=ctx.createGain();tone.type="triangle";
+  tone.frequency.setValueAtTime(235*(.9+Math.random()*.18),now);
+  tone.frequency.exponentialRampToValueAtTime(82,now+.32);
+  toneGain.gain.setValueAtTime(.3,now);toneGain.gain.exponentialRampToValueAtTime(.001,now+.36);
+  tone.connect(toneGain);toneGain.connect(input);tone.start(now);tone.stop(now+.38);tone.onended=output.release;
+}
 function pushVisualEffect(effect){
   effect.maxLife=effect.maxLife||effect.life||.2;
   visualEffects.push(effect);
@@ -2267,6 +2822,7 @@ function spawnWorkEffect(worker,target){
     -Math.PI/2+(Math.random()-.5)*1.6,-14,worker.team);
 }
 function spawnMuzzleEffect(attacker,target,kind){
+  playShotSound(attacker,kind);
   const angle=Math.atan2(target.y-attacker.y,target.x-attacker.x),distance=(attacker.radius||16)+5;
   const x=attacker.x+Math.cos(angle)*distance,y=attacker.y+Math.sin(angle)*distance;
   if(kind==="shell"){
@@ -2309,6 +2865,7 @@ function spawnExplosion(x,y,radius=30,color="#ff9b3d",team=null){
 function spawnProjectileImpact(projectile,target,attacker){
   if(projectile.effectKind==="shell"){
     const stats=attacker.kind==="building"?BUILDING_TYPES[attacker.type]:UNIT_TYPES[attacker.type];
+    playExplosionSound(target.x,target.y,projectile.team,stats?.splashRadius||30);
     spawnExplosion(target.x,target.y,stats?.splashRadius||30,
       projectile.team===localTeam?"#ff9f43":"#ff6b4a",projectile.team);
   }else{
@@ -2325,6 +2882,7 @@ function spawnHealEffect(medic,target){
 }
 function spawnDeathEffect(entity){
   const heavy=entity.kind==="building"||unitArmor(entity)==="heavy"||unitArmor(entity)==="air";
+  if(heavy)playDestructionSound(entity);else playDeathSound(entity);
   const color=entity.team===localTeam?"#76cfff":"#ff7777",radius=entity.radius||16;
   addEffectRing(entity.x,entity.y,heavy?"#ff9b45":color,Math.max(4,radius*.3),heavy?120:70,heavy?.55:.38,3,entity.team);
   if(heavy)spawnExplosion(entity.x,entity.y,Math.min(70,radius*1.6),"#ff704d",entity.team);
@@ -2872,6 +3430,14 @@ function checkGameOver(){
   if(hqByTeam[0]&&hqByTeam[0].hp<=0){gameOver=true;winnerTeam=1;}
   if(hqByTeam[1]&&hqByTeam[1].hp<=0){gameOver=true;winnerTeam=0;}
 }
+function updateGameOverActions(){
+  const show=started&&gameOver;
+  gameOverActions.classList.toggle("show",show);
+  if(show&&!gameOverUiShown){
+    gameOverUiShown=true;
+    if(document.pointerLockElement===canvas)document.exitPointerLock?.();
+  }else if(!show)gameOverUiShown=false;
+}
 
 /* 간단 연습모드 AI */
 let aiBuildTimer=0,aiWaveTimer=0;
@@ -3176,6 +3742,22 @@ canvas.addEventListener("mouseup",e=>{
   }
 });
 addEventListener("keydown",e=>{
+  if(e.key.toLowerCase()==="o"&&started&&!e.repeat){
+    e.preventDefault();
+    toggleGuide();
+    return;
+  }
+  if(e.key.toLowerCase()==="i"&&started&&!e.repeat){
+    e.preventDefault();
+    toggleEncyclopedia();
+    return;
+  }
+  if(e.key==="Shift"&&encyclopedia.classList.contains("show")&&!e.repeat){
+    e.preventDefault();
+    navigateCodexBack();
+    return;
+  }
+  if(infoModalOpen())return;
   if(e.key.toLowerCase()==="p"&&started&&!e.repeat){
     e.preventDefault();
     toggleFullscreenAndPointerLock();
@@ -3307,46 +3889,47 @@ function drawResource(r){
   ctx.fillText(!visible?"위치":depleted?"자원":`${activeMinerCount(r.id)}/${MAX_MINERS_PER_NODE}`,0,13);
   ctx.restore();
 }
+function paintBuildingModel(renderCtx,b,r,selected=false,label=""){
+  const accent=b.type==="barracks"?"#6d8f58":b.type==="factory"?"#667483":b.type==="airport"?"#6d67a0":
+    b.type==="groundTurret"?"#7d6848":b.type==="radar"?"#397f82":b.type==="aaTurret"?"#735d83":
+    b.type==="resourceDepot"?"#9a7134":"#4b8ddb";
+  renderCtx.fillStyle=b.team===localTeam?accent:"#b95050";
+  renderCtx.fillRect(-r,-r,r*2,r*2);
+  renderCtx.fillStyle="rgba(255,255,255,.18)";renderCtx.fillRect(-r+8,-r+8,r*2-16,Math.max(10,r*.38));
+  if(b.type==="airport"){
+    renderCtx.strokeStyle="rgba(255,255,255,.55)";renderCtx.lineWidth=4;
+    renderCtx.beginPath();renderCtx.moveTo(-r+10,0);renderCtx.lineTo(r-10,0);renderCtx.moveTo(0,-r+10);renderCtx.lineTo(0,r-10);renderCtx.stroke();
+  }else if(b.type==="groundTurret"){
+    renderCtx.fillStyle="rgba(15,20,22,.62)";renderCtx.beginPath();renderCtx.arc(0,0,r*.5,0,Math.PI*2);renderCtx.fill();
+    renderCtx.save();renderCtx.rotate(b.renderTurretFacing??b.turretFacing??0);
+    renderCtx.strokeStyle="rgba(255,255,255,.65)";renderCtx.lineWidth=4;renderCtx.beginPath();renderCtx.moveTo(0,0);renderCtx.lineTo(r*.82,0);renderCtx.stroke();renderCtx.restore();
+  }else if(b.type==="radar"){
+    renderCtx.strokeStyle="rgba(180,255,255,.75)";renderCtx.lineWidth=2;
+    renderCtx.beginPath();renderCtx.arc(0,2,r*.48,Math.PI*1.15,Math.PI*1.85);renderCtx.stroke();
+    renderCtx.beginPath();renderCtx.arc(0,2,r*.75,Math.PI*1.15,Math.PI*1.85);renderCtx.stroke();
+    renderCtx.beginPath();renderCtx.moveTo(0,2);renderCtx.lineTo(0,r*.72);renderCtx.stroke();
+  }else if(b.type==="aaTurret"){
+    renderCtx.fillStyle="rgba(15,20,22,.62)";renderCtx.beginPath();renderCtx.arc(0,0,r*.48,0,Math.PI*2);renderCtx.fill();
+    renderCtx.save();renderCtx.rotate(b.renderTurretFacing??b.turretFacing??0);
+    renderCtx.strokeStyle="rgba(255,255,255,.68)";renderCtx.lineWidth=3;
+    renderCtx.beginPath();renderCtx.moveTo(0,-6);renderCtx.lineTo(r*.82,-8);renderCtx.moveTo(0,6);renderCtx.lineTo(r*.82,8);renderCtx.stroke();renderCtx.restore();
+  }else if(b.type==="resourceDepot"){
+    renderCtx.fillStyle="rgba(28,22,12,.55)";renderCtx.fillRect(-r*.66,-r*.42,r*1.32,r*.84);
+    renderCtx.strokeStyle="rgba(255,225,145,.8)";renderCtx.lineWidth=2;
+    renderCtx.strokeRect(-r*.66,-r*.42,r*1.32,r*.84);
+    renderCtx.beginPath();renderCtx.moveTo(-r*.66,-r*.12);renderCtx.lineTo(r*.66,-r*.12);renderCtx.moveTo(-r*.66,r*.18);renderCtx.lineTo(r*.66,r*.18);renderCtx.stroke();
+  }
+  renderCtx.strokeStyle=selected?"#fff":"rgba(0,0,0,.45)";renderCtx.lineWidth=selected?3:2;renderCtx.strokeRect(-r-2,-r-2,r*2+4,r*2+4);
+  if(label){renderCtx.fillStyle="#fff";renderCtx.font="bold 12px sans-serif";renderCtx.textAlign="center";renderCtx.fillText(label,0,5);}
+}
 function drawBuilding(b){
   if(typeof b.hp==="number"&&b.hp<=0)return;
   const visible=entityVisibleTo(localTeam,b);
   if(!visible&&b.type!=="hq")return;
   const p=displayPos(b),s=worldToScreen(p.x,p.y),sel=selectedIds.includes(b.id);
   ctx.save();ctx.translate(s.x,s.y);ctx.globalAlpha=visible?1:.48;
-  const r=b.radius||36;
-  const accent=b.type==="barracks"?"#6d8f58":b.type==="factory"?"#667483":b.type==="airport"?"#6d67a0":
-    b.type==="groundTurret"?"#7d6848":b.type==="radar"?"#397f82":b.type==="aaTurret"?"#735d83":
-    b.type==="resourceDepot"?"#9a7134":"#4b8ddb";
-  ctx.fillStyle=b.team===localTeam?accent:"#b95050";
-  ctx.fillRect(-r,-r,r*2,r*2);
-  ctx.fillStyle="rgba(255,255,255,.18)";ctx.fillRect(-r+8,-r+8,r*2-16,Math.max(10,r*.38));
-  if(b.type==="airport"){
-    ctx.strokeStyle="rgba(255,255,255,.55)";ctx.lineWidth=4;
-    ctx.beginPath();ctx.moveTo(-r+10,0);ctx.lineTo(r-10,0);ctx.moveTo(0,-r+10);ctx.lineTo(0,r-10);ctx.stroke();
-  }else if(b.type==="groundTurret"){
-    ctx.fillStyle="rgba(15,20,22,.62)";ctx.beginPath();ctx.arc(0,0,r*.5,0,Math.PI*2);ctx.fill();
-    ctx.save();ctx.rotate(b.renderTurretFacing??b.turretFacing??0);
-    ctx.strokeStyle="rgba(255,255,255,.65)";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(r*.82,0);ctx.stroke();ctx.restore();
-  }else if(b.type==="radar"){
-    ctx.strokeStyle="rgba(180,255,255,.75)";ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(0,2,r*.48,Math.PI*1.15,Math.PI*1.85);ctx.stroke();
-    ctx.beginPath();ctx.arc(0,2,r*.75,Math.PI*1.15,Math.PI*1.85);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(0,2);ctx.lineTo(0,r*.72);ctx.stroke();
-  }else if(b.type==="aaTurret"){
-    ctx.fillStyle="rgba(15,20,22,.62)";ctx.beginPath();ctx.arc(0,0,r*.48,0,Math.PI*2);ctx.fill();
-    ctx.save();ctx.rotate(b.renderTurretFacing??b.turretFacing??0);
-    ctx.strokeStyle="rgba(255,255,255,.68)";ctx.lineWidth=3;
-    ctx.beginPath();ctx.moveTo(0,-6);ctx.lineTo(r*.82,-8);ctx.moveTo(0,6);ctx.lineTo(r*.82,8);ctx.stroke();ctx.restore();
-  }else if(b.type==="resourceDepot"){
-    ctx.fillStyle="rgba(28,22,12,.55)";ctx.fillRect(-r*.66,-r*.42,r*1.32,r*.84);
-    ctx.strokeStyle="rgba(255,225,145,.8)";ctx.lineWidth=2;
-    ctx.strokeRect(-r*.66,-r*.42,r*1.32,r*.84);
-    ctx.beginPath();ctx.moveTo(-r*.66,-r*.12);ctx.lineTo(r*.66,-r*.12);ctx.moveTo(-r*.66,r*.18);ctx.lineTo(r*.66,r*.18);ctx.stroke();
-  }
-  ctx.strokeStyle=sel?"#fff":"rgba(0,0,0,.45)";ctx.lineWidth=sel?3:2;ctx.strokeRect(-r-2,-r-2,r*2+4,r*2+4);
-  ctx.fillStyle="#fff";ctx.font="bold 12px sans-serif";ctx.textAlign="center";
-  const label=visible?(b.complete===false?`${b.name} 건설 중`:b.name):"적 사령부 위치";
-  ctx.fillText(label,0,5);
+  const r=b.radius||36,label=visible?(b.complete===false?`${b.name} 건설 중`:b.name):"적 사령부 위치";
+  paintBuildingModel(ctx,b,r,sel,label);
   ctx.restore();
   if(visible&&typeof b.hp==="number") drawHealth(b,s.x,s.y,r*2);
   if(visible&&b.complete===false){
@@ -3373,6 +3956,80 @@ function unitColor(u){
   if(u.type==="stealthFighter")return u.team===localTeam?"#7183a8":"#a27088";
   return u.team===localTeam?"#78b8ff":"#ff7777";
 }
+function paintUnitModel(renderCtx,u,bodyFacing=0,turretFacing=bodyFacing,selected=false){
+  const bodyColor=unitColor(u),outline=selected?"#fff":"rgba(0,0,0,.55)";
+  renderCtx.save();renderCtx.rotate(bodyFacing);renderCtx.fillStyle=bodyColor;renderCtx.strokeStyle=outline;renderCtx.lineWidth=selected?3:2;
+  if(u.type==="heavyTank"){
+    renderCtx.fillRect(-18,-13,36,26);renderCtx.strokeRect(-18,-13,36,26);
+    renderCtx.fillStyle="rgba(20,20,20,.42)";renderCtx.fillRect(-16,-17,31,5);renderCtx.fillRect(-16,12,31,5);
+    renderCtx.beginPath();renderCtx.arc(2,0,8,0,Math.PI*2);renderCtx.fill();
+    renderCtx.strokeStyle="#20272c";renderCtx.lineWidth=5;renderCtx.beginPath();renderCtx.moveTo(4,0);renderCtx.lineTo(27,0);renderCtx.stroke();
+  }else if(u.type==="artillery"){
+    renderCtx.fillRect(-17,-12,34,24);renderCtx.strokeRect(-17,-12,34,24);
+    renderCtx.fillStyle="rgba(20,20,20,.42)";renderCtx.fillRect(-15,-16,28,4);renderCtx.fillRect(-15,12,28,4);
+    renderCtx.beginPath();renderCtx.arc(0,0,7,0,Math.PI*2);renderCtx.fill();
+    renderCtx.strokeStyle="#20272c";renderCtx.lineWidth=5;renderCtx.beginPath();renderCtx.moveTo(2,0);renderCtx.lineTo(32,0);renderCtx.stroke();
+  }else if(u.type==="radarVehicle"){
+    renderCtx.beginPath();renderCtx.moveTo(18,0);renderCtx.lineTo(11,11);renderCtx.lineTo(-16,11);renderCtx.lineTo(-16,-11);renderCtx.lineTo(11,-11);renderCtx.closePath();renderCtx.fill();renderCtx.stroke();
+    renderCtx.strokeStyle="#d8ffff";renderCtx.lineWidth=2;renderCtx.beginPath();renderCtx.arc(-1,0,11,-Math.PI/2,Math.PI/2);renderCtx.stroke();
+    renderCtx.beginPath();renderCtx.moveTo(-1,0);renderCtx.lineTo(-12,0);renderCtx.stroke();
+  }else if(u.type==="humvee"){
+    renderCtx.beginPath();renderCtx.moveTo(18,0);renderCtx.lineTo(12,10);renderCtx.lineTo(-15,10);renderCtx.lineTo(-18,6);renderCtx.lineTo(-18,-6);renderCtx.lineTo(-15,-10);renderCtx.lineTo(12,-10);renderCtx.closePath();renderCtx.fill();renderCtx.stroke();
+    renderCtx.fillStyle="rgba(20,20,20,.48)";renderCtx.fillRect(-12,-14,8,4);renderCtx.fillRect(7,-14,8,4);renderCtx.fillRect(-12,10,8,4);renderCtx.fillRect(7,10,8,4);
+  }else if(u.type==="lightAircraft"||u.type==="stealthFighter"){
+    renderCtx.beginPath();renderCtx.moveTo(23,0);renderCtx.lineTo(6,7);renderCtx.lineTo(-8,21);renderCtx.lineTo(-6,6);renderCtx.lineTo(-21,3);renderCtx.lineTo(-21,-3);renderCtx.lineTo(-6,-6);renderCtx.lineTo(-8,-21);renderCtx.lineTo(6,-7);renderCtx.closePath();renderCtx.fill();renderCtx.stroke();
+    if(u.type==="stealthFighter"){
+      renderCtx.strokeStyle="rgba(150,235,255,.8)";renderCtx.setLineDash([4,3]);renderCtx.beginPath();renderCtx.arc(0,0,24,0,Math.PI*2);renderCtx.stroke();renderCtx.setLineDash([]);
+    }
+  }else if(u.type==="sniper"){
+    renderCtx.beginPath();renderCtx.moveTo(15,0);renderCtx.lineTo(-11,11);renderCtx.lineTo(-11,-11);renderCtx.closePath();renderCtx.fill();renderCtx.stroke();
+    renderCtx.strokeStyle="#111";renderCtx.lineWidth=2;renderCtx.beginPath();renderCtx.moveTo(0,-3);renderCtx.lineTo(22,-3);renderCtx.stroke();
+  }else if(u.type==="medic"){
+    renderCtx.beginPath();renderCtx.arc(0,0,14,0,Math.PI*2);renderCtx.fill();renderCtx.stroke();
+    renderCtx.fillStyle="#fff";renderCtx.fillRect(-3,-9,6,18);renderCtx.fillRect(-9,-3,18,6);
+    renderCtx.fillStyle="#244";renderCtx.beginPath();renderCtx.moveTo(17,0);renderCtx.lineTo(10,-5);renderCtx.lineTo(10,5);renderCtx.closePath();renderCtx.fill();
+  }else if(u.type==="antitank"){
+    renderCtx.fillRect(-13,-12,26,24);renderCtx.strokeRect(-13,-12,26,24);
+    renderCtx.strokeStyle="#222";renderCtx.lineWidth=5;renderCtx.beginPath();renderCtx.moveTo(-3,0);renderCtx.lineTo(23,0);renderCtx.stroke();
+  }else if(u.type==="antiair"){
+    renderCtx.beginPath();renderCtx.moveTo(15,0);renderCtx.lineTo(0,15);renderCtx.lineTo(-15,0);renderCtx.lineTo(0,-15);renderCtx.closePath();renderCtx.fill();renderCtx.stroke();
+    renderCtx.strokeStyle="#222";renderCtx.lineWidth=2;renderCtx.beginPath();renderCtx.moveTo(0,-5);renderCtx.lineTo(20,-9);renderCtx.moveTo(0,5);renderCtx.lineTo(20,9);renderCtx.stroke();
+  }else if(u.type==="worker"){
+    renderCtx.fillRect(-11,-11,22,22);renderCtx.strokeRect(-11,-11,22,22);
+    renderCtx.fillStyle="rgba(30,40,45,.55)";renderCtx.beginPath();renderCtx.moveTo(17,0);renderCtx.lineTo(10,-9);renderCtx.lineTo(10,9);renderCtx.closePath();renderCtx.fill();
+    renderCtx.strokeStyle="#222";renderCtx.lineWidth=3;renderCtx.beginPath();renderCtx.moveTo(-9,-8);renderCtx.lineTo(8,9);renderCtx.stroke();
+  }else{
+    renderCtx.beginPath();renderCtx.arc(0,0,13,0,Math.PI*2);renderCtx.fill();renderCtx.stroke();
+    renderCtx.strokeStyle="#20272c";renderCtx.lineWidth=3;renderCtx.beginPath();renderCtx.moveTo(2,0);renderCtx.lineTo(20,0);renderCtx.stroke();
+  }
+  renderCtx.restore();
+  if(u.type==="humvee"){
+    renderCtx.save();renderCtx.rotate(turretFacing);renderCtx.fillStyle="#273238";renderCtx.beginPath();renderCtx.arc(0,0,6,0,Math.PI*2);renderCtx.fill();
+    renderCtx.strokeStyle="#182025";renderCtx.lineWidth=3;renderCtx.beginPath();renderCtx.moveTo(3,0);renderCtx.lineTo(20,0);renderCtx.stroke();renderCtx.restore();
+  }
+}
+function drawCodexPortrait(portrait,type,kind){
+  const portraitCtx=portrait.getContext("2d");if(!portraitCtx)return;
+  const width=portrait.width,height=portrait.height;
+  portraitCtx.clearRect(0,0,width,height);
+  const background=portraitCtx.createRadialGradient(width*.5,height*.44,4,width*.5,height*.5,Math.max(width,height)*.55);
+  background.addColorStop(0,"#2a4655");background.addColorStop(1,"#10181e");
+  portraitCtx.fillStyle=background;portraitCtx.fillRect(0,0,width,height);
+  portraitCtx.strokeStyle="rgba(135,211,248,.08)";portraitCtx.lineWidth=1;
+  for(let x=0;x<width;x+=32){portraitCtx.beginPath();portraitCtx.moveTo(x,0);portraitCtx.lineTo(x,height);portraitCtx.stroke();}
+  for(let y=0;y<height;y+=32){portraitCtx.beginPath();portraitCtx.moveTo(0,y);portraitCtx.lineTo(width,y);portraitCtx.stroke();}
+  portraitCtx.save();portraitCtx.translate(width/2,height/2);
+  if(kind==="unit"){
+    const stats=UNIT_TYPES[type],scale=Math.max(2.6,Math.min(4.4,height/62));
+    portraitCtx.scale(scale,scale);if(stats.cloaked)portraitCtx.globalAlpha=.72;
+    paintUnitModel(portraitCtx,{type,team:localTeam},-.18,-.18,false);
+  }else{
+    const stats=BUILDING_TYPES[type],radius=stats.radius||36,scale=Math.max(1.55,Math.min(2.8,height/(radius*2.75)));
+    portraitCtx.scale(scale,scale);
+    paintBuildingModel(portraitCtx,{type,team:localTeam,turretFacing:-.22,renderTurretFacing:-.22},radius,false,"");
+  }
+  portraitCtx.restore();
+}
 function drawUnit(u){
   if(u.hp<=0||!entityVisibleTo(localTeam,u))return;
   const p=displayPos(u),s=worldToScreen(p.x,p.y),sel=selectedIds.includes(u.id);
@@ -3380,56 +4037,7 @@ function drawUnit(u){
   if(UNIT_TYPES[u.type].cloaked&&u.team===localTeam)ctx.globalAlpha=.7;
   const bodyFacing=Number.isFinite(u.renderFacing)?u.renderFacing:(Number.isFinite(u.facing)?u.facing:(u.team===TEAM_LEFT?0:Math.PI));
   const turretFacing=Number.isFinite(u.renderTurretFacing)?u.renderTurretFacing:(Number.isFinite(u.turretFacing)?u.turretFacing:bodyFacing);
-  const bodyColor=unitColor(u),outline=sel?"#fff":"rgba(0,0,0,.55)";
-  ctx.save();ctx.rotate(bodyFacing);ctx.fillStyle=bodyColor;ctx.strokeStyle=outline;ctx.lineWidth=sel?3:2;
-  if(u.type==="heavyTank"){
-    ctx.fillRect(-18,-13,36,26);ctx.strokeRect(-18,-13,36,26);
-    ctx.fillStyle="rgba(20,20,20,.42)";ctx.fillRect(-16,-17,31,5);ctx.fillRect(-16,12,31,5);
-    ctx.beginPath();ctx.arc(2,0,8,0,Math.PI*2);ctx.fill();
-    ctx.strokeStyle="#20272c";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(4,0);ctx.lineTo(27,0);ctx.stroke();
-  }else if(u.type==="artillery"){
-    ctx.fillRect(-17,-12,34,24);ctx.strokeRect(-17,-12,34,24);
-    ctx.fillStyle="rgba(20,20,20,.42)";ctx.fillRect(-15,-16,28,4);ctx.fillRect(-15,12,28,4);
-    ctx.beginPath();ctx.arc(0,0,7,0,Math.PI*2);ctx.fill();
-    ctx.strokeStyle="#20272c";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(2,0);ctx.lineTo(32,0);ctx.stroke();
-  }else if(u.type==="radarVehicle"){
-    ctx.beginPath();ctx.moveTo(18,0);ctx.lineTo(11,11);ctx.lineTo(-16,11);ctx.lineTo(-16,-11);ctx.lineTo(11,-11);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.strokeStyle="#d8ffff";ctx.lineWidth=2;ctx.beginPath();ctx.arc(-1,0,11,-Math.PI/2,Math.PI/2);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(-1,0);ctx.lineTo(-12,0);ctx.stroke();
-  }else if(u.type==="humvee"){
-    ctx.beginPath();ctx.moveTo(18,0);ctx.lineTo(12,10);ctx.lineTo(-15,10);ctx.lineTo(-18,6);ctx.lineTo(-18,-6);ctx.lineTo(-15,-10);ctx.lineTo(12,-10);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.fillStyle="rgba(20,20,20,.48)";ctx.fillRect(-12,-14,8,4);ctx.fillRect(7,-14,8,4);ctx.fillRect(-12,10,8,4);ctx.fillRect(7,10,8,4);
-  }else if(u.type==="lightAircraft"||u.type==="stealthFighter"){
-    ctx.beginPath();ctx.moveTo(23,0);ctx.lineTo(6,7);ctx.lineTo(-8,21);ctx.lineTo(-6,6);ctx.lineTo(-21,3);ctx.lineTo(-21,-3);ctx.lineTo(-6,-6);ctx.lineTo(-8,-21);ctx.lineTo(6,-7);ctx.closePath();ctx.fill();ctx.stroke();
-    if(u.type==="stealthFighter"){
-      ctx.strokeStyle="rgba(150,235,255,.8)";ctx.setLineDash([4,3]);ctx.beginPath();ctx.arc(0,0,24,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
-    }
-  }else if(u.type==="sniper"){
-    ctx.beginPath();ctx.moveTo(15,0);ctx.lineTo(-11,11);ctx.lineTo(-11,-11);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.strokeStyle="#111";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,-3);ctx.lineTo(22,-3);ctx.stroke();
-  }else if(u.type==="medic"){
-    ctx.beginPath();ctx.arc(0,0,14,0,Math.PI*2);ctx.fill();ctx.stroke();
-    ctx.fillStyle="#fff";ctx.fillRect(-3,-9,6,18);ctx.fillRect(-9,-3,18,6);
-    ctx.fillStyle="#244";ctx.beginPath();ctx.moveTo(17,0);ctx.lineTo(10,-5);ctx.lineTo(10,5);ctx.closePath();ctx.fill();
-  }else if(u.type==="antitank"){
-    ctx.fillRect(-13,-12,26,24);ctx.strokeRect(-13,-12,26,24);
-    ctx.strokeStyle="#222";ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(-3,0);ctx.lineTo(23,0);ctx.stroke();
-  }else if(u.type==="antiair"){
-    ctx.beginPath();ctx.moveTo(15,0);ctx.lineTo(0,15);ctx.lineTo(-15,0);ctx.lineTo(0,-15);ctx.closePath();ctx.fill();ctx.stroke();
-    ctx.strokeStyle="#222";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,-5);ctx.lineTo(20,-9);ctx.moveTo(0,5);ctx.lineTo(20,9);ctx.stroke();
-  }else if(u.type==="worker"){
-    ctx.fillRect(-11,-11,22,22);ctx.strokeRect(-11,-11,22,22);
-    ctx.fillStyle="rgba(30,40,45,.55)";ctx.beginPath();ctx.moveTo(17,0);ctx.lineTo(10,-9);ctx.lineTo(10,9);ctx.closePath();ctx.fill();
-    ctx.strokeStyle="#222";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(-9,-8);ctx.lineTo(8,9);ctx.stroke();
-  }else{
-    ctx.beginPath();ctx.arc(0,0,13,0,Math.PI*2);ctx.fill();ctx.stroke();
-    ctx.strokeStyle="#20272c";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(2,0);ctx.lineTo(20,0);ctx.stroke();
-  }
-  ctx.restore();
-  if(u.type==="humvee"){
-    ctx.save();ctx.rotate(turretFacing);ctx.fillStyle="#273238";ctx.beginPath();ctx.arc(0,0,6,0,Math.PI*2);ctx.fill();
-    ctx.strokeStyle="#182025";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(3,0);ctx.lineTo(20,0);ctx.stroke();ctx.restore();
-  }
+  paintUnitModel(ctx,u,bodyFacing,turretFacing,sel);
   ctx.fillStyle="#fff";ctx.font="10px sans-serif";ctx.textAlign="center";ctx.fillText(UNIT_TYPES[u.type].name,0,u.radius+16);
   if(u.type==="worker"&&u.carry>0){ctx.fillStyle="#9ee7ff";ctx.font="bold 9px sans-serif";ctx.fillText(u.carry.toFixed(1),0,-u.radius-18);}
   ctx.restore();drawHealth(u,s.x,s.y,34);
@@ -3702,8 +4310,11 @@ function updateVisualEffects(dt){
     if(effect.life<=0){
       visualEffects.splice(i,1);
       if(effect.type==="remoteShot"){
-        if(effect.effectKind==="shell")spawnExplosion(effect.targetX,effect.targetY,effect.impactRadius,
-          effect.team===localTeam?"#ff9f43":"#ff6b4a",effect.team);
+        if(effect.effectKind==="shell"){
+          playExplosionSound(effect.targetX,effect.targetY,effect.team,effect.impactRadius);
+          spawnExplosion(effect.targetX,effect.targetY,effect.impactRadius,
+            effect.team===localTeam?"#ff9f43":"#ff6b4a",effect.team);
+        }
         else{
           addEffectRing(effect.targetX,effect.targetY,"#ffe49a",2,35,.18,1.5,effect.team);
           for(let spark=0;spark<4;spark++)addEffectParticle(effect.targetX,effect.targetY,"#ffd166",1.8,.22,55,
@@ -3884,6 +4495,7 @@ function loop(now){
   if(isNetworkGame()&&!authoritative&&started&&!gamePaused)updateGuestInteractionEffects(dt);
   if(!gamePaused)updateVisualEffects(dt);
   if(isNetworkGame()&&authoritative)sendSnapshot(false);
+  updateGameOverActions();
   draw();
   requestAnimationFrame(loop);
 }

@@ -17,12 +17,15 @@
   #game { position:fixed; inset:0; width:100vw; height:100vh; display:block; background:#101418; }
   #topControls {
     position:fixed; left:12px; top:12px; z-index:16;
-    display:flex; align-items:center; gap:7px;
+    display:flex; align-items:center; gap:7px; flex-wrap:wrap; max-width:calc(100vw - 24px);
   }
   #topControls button {
     padding:7px 10px; border:1px solid rgba(255,255,255,.15); border-radius:8px;
     background:rgba(7,10,13,.80); color:white; cursor:pointer; font-weight:700;
   }
+  #dropUnitsBtn { display:none; border-color:rgba(107,213,255,.38); background:rgba(20,55,70,.9); }
+  #dropUnitsBtn.show { display:block; }
+  #dropUnitsBtn.ready { color:#effcff; border-color:#6de4ff; box-shadow:0 0 10px rgba(75,216,255,.45); }
   .infoModal {
     position:fixed; inset:0; z-index:14; display:none;
     align-items:center; justify-content:center; padding:64px 24px 24px;
@@ -207,6 +210,7 @@
   <button id="fullscreenBtn">마우스 잠금 (P)</button>
   <button id="guideBtn">조작 설명 (O)</button>
   <button id="encyclopediaBtn">도감 (I)</button>
+  <button id="dropUnitsBtn">유닛 드랍 (D) · 0/8</button>
 </div>
 
 <div id="help" class="infoModal" aria-hidden="true">
@@ -221,6 +225,8 @@
         <div class="guideRow"><strong>좌클릭</strong><span>유닛 또는 건물 하나를 선택합니다.</span></div>
         <div class="guideRow"><strong>좌클릭 드래그</strong><span>범위 안의 아군 유닛을 한꺼번에 선택합니다.</span></div>
         <div class="guideRow"><strong>우클릭</strong><span>이동하거나 대상에 맞는 공격·채집·반납·건설 지원·회복 명령을 내립니다.</span></div>
+        <div class="guideRow"><strong>수송선 우클릭</strong><span>지상 유닛과 수송선이 서로 도달 가능한 가장 가까운 해안으로 이동해 만납니다. 정원이 가득 차면 승선 거리 안에서 정지합니다.</span></div>
+        <div class="guideRow"><strong><kbd>D</kbd> 유닛 드랍</strong><span>선택한 수송선이 가장 가까운 하선 가능 해안으로 이동해 탑승 병력을 내립니다.</span></div>
         <div class="guideRow"><strong>마우스 휠</strong><span>현재 커서 위치를 기준으로 화면을 확대하거나 축소합니다.</span></div>
         <div class="guideRow"><strong>화면 가장자리</strong><span>커서를 가장자리로 옮겨 카메라를 이동합니다.</span></div>
       </section>
@@ -338,6 +344,7 @@ const guideBtn = document.getElementById("guideBtn");
 const help = document.getElementById("help");
 const guideCloseBtn = document.getElementById("guideCloseBtn");
 const encyclopediaBtn = document.getElementById("encyclopediaBtn");
+const dropUnitsBtn = document.getElementById("dropUnitsBtn");
 const encyclopedia = document.getElementById("encyclopedia");
 const encyclopediaPanel = document.getElementById("encyclopediaPanel");
 const encyclopediaCloseBtn = document.getElementById("encyclopediaCloseBtn");
@@ -429,6 +436,7 @@ function infoModalOpen(){return help.classList.contains("show")||encyclopedia.cl
 guideBtn.onclick=toggleGuide;
 guideCloseBtn.onclick=()=>setGuideVisible(false);
 encyclopediaBtn.onclick=toggleEncyclopedia;
+dropUnitsBtn.onclick=issueSelectedTransportDrop;
 encyclopediaCloseBtn.onclick=()=>setEncyclopediaVisible(false);
 encyclopediaBackBtn.onclick=navigateCodexBack;
 for(const button of encyclopedia.querySelectorAll("[data-codex-kind]"))button.onclick=()=>showCodexList(button.dataset.codexKind);
@@ -459,6 +467,7 @@ const MAX_MINERS_PER_NODE=5;
 const HILL_DAMAGE_MULT = 0.70;
 const NAV_CLEARANCE=12;
 const MIN_NAV_CLEARANCE=4;
+const NAVAL_CLEARANCE=8;
 const NAV_PLAN_COUNT_BUDGET=8;
 const NAV_PLAN_TIME_BUDGET_MS=2.5;
 const NAV_JOB_SLICE_MS=.35;
@@ -477,6 +486,7 @@ let selectedMapId="default";
 let navPlansThisFrame=0,navPlanTimeThisFrame=0,navFrameNow=0,navCacheLastPrune=0,navFrameSerial=0;
 const navPathCache=new Map();
 const navSharedFieldCache=new Map();
+const navalPathCache=new Map();
 const navTerrainWalkabilityCache=new Map();
 const navTerrainEdgeCache=new Map();
 const navPendingJobs=[];
@@ -654,6 +664,16 @@ const UNIT_TYPES = {
     name:"스텔스기", hp:105, speed:108, range:205, damage:34, reload:1.55,
     vision:390, cost:145, build:13, radius:16, armor:"air", layer:"air", targets:["ground","air"],cloaked:true,
     special:"상시 클로킹 전투기: 강한 공격력, 중간 기동성, 낮은 체력"
+  },
+  fastBoat: {
+    name:"고속정", hp:140, speed:122, range:175, damage:14, reload:.68,
+    vision:390, cost:75, build:8, radius:17, armor:"heavy", layer:"naval", targets:["ground","naval"],
+    special:"고속 수상 전투정: 빠른 기동성과 중간 공격력, 낮은 체력"
+  },
+  transportShip: {
+    name:"수송선", hp:260, speed:72, range:0, damage:0, reload:1,
+    vision:350, cost:95, build:10, radius:22, armor:"heavy", layer:"naval", targets:[],transportCapacity:8,
+    special:"수상 수송선: 지상 병력을 최대 인구 8까지 승선시켜 해안으로 수송"
   }
 };
 
@@ -662,6 +682,7 @@ const BUILDING_TYPES = {
   barracks:{name:"병영",hp:650,radius:36,vision:270,cost:120,build:7,produces:["infantry","medic","sniper","antitank","antiair"]},
   factory:{name:"군수공장",hp:900,radius:42,vision:280,cost:180,build:10,produces:["heavyTank","artillery","radarVehicle","humvee"]},
   airport:{name:"공항",hp:720,radius:40,vision:300,cost:160,build:9,produces:["lightAircraft","stealthFighter"]},
+  shipyard:{name:"조선소",hp:780,radius:40,vision:320,cost:170,build:10,produces:["fastBoat","transportShip"],requiresWater:true},
   groundTurret:{name:"지상포탑",hp:720,radius:30,vision:330,cost:90,build:6,produces:[],range:235,damage:15,reload:.75,targets:["ground"]},
   radar:{name:"레이더",hp:540,radius:32,vision:650,detection:650,unobstructedVision:true,cost:120,build:7,produces:[]},
   aaTurret:{name:"공대공 포탑",hp:660,radius:30,vision:460,cost:105,build:6.5,produces:[],range:290,damage:21,reload:.8,targets:["air"]},
@@ -669,8 +690,8 @@ const BUILDING_TYPES = {
 };
 
 const CODEX_ARMOR_NAMES={human:"인간",heavy:"중장갑",air:"공중"};
-const CODEX_LAYER_NAMES={ground:"지상",air:"공중"};
-const CODEX_TARGET_NAMES={ground:"지상",air:"공중"};
+const CODEX_LAYER_NAMES={ground:"지상",air:"공중",naval:"수상"};
+const CODEX_TARGET_NAMES={ground:"지상",air:"공중",naval:"수상"};
 let encyclopediaRendered=false;
 function codexNumber(value,digits=2){
   const number=Number(value);
@@ -711,7 +732,7 @@ function codexUnitRules(type,stats){
   if(type==="worker"){
     rules.push(`채집: 초당 1 자원 · 최대 운반량 5 · 자원 하나당 동시 채집 ${MAX_MINERS_PER_NODE}명`);
     rules.push("자동 수리: 명령이 없을 때 반경 90 안의 아군 중장갑 유닛 또는 완성 건물을 초당 3 HP 수리");
-    rules.push("건설 가능: 병영, 군수공장, 공항, 지상포탑, 레이더, 공대공 포탑, 자원창고");
+    rules.push("건설 가능: 병영, 군수공장, 공항, 조선소, 지상포탑, 레이더, 공대공 포탑, 자원창고");
   }
   if(type==="infantry")rules.push("제압 사격: 4번째 공격마다 기본 피해가 150%로 증가");
   if(type==="sniper")rules.push("피해 배율: 인간 190% · 중장갑 16% · 기타 45%");
@@ -722,6 +743,8 @@ function codexUnitRules(type,stats){
   if(stats.fireWhileMoving)rules.push("이동 사격 가능: 차량부는 이동 방향, 포신은 공격 방향을 바라봄");
   if(stats.cloaked)rules.push("상시 클로킹: 적 탐지 범위 안에서만 노출");
   if(stats.layer==="air")rules.push("공중 이동: 벽, 언덕, 물, 공허와 지상 충돌을 무시하고 이동");
+  if(stats.layer==="naval")rules.push("수상 이동: 물 타일에서만 이동하며 육지와 다른 차단 지형을 통과할 수 없음");
+  if(stats.transportCapacity)rules.push(`수송 능력: 지상 유닛 최대 ${codexNumber(stats.transportCapacity)}명 · 우클릭 시 양쪽이 도달 가능한 해안으로 이동해 승선, 수송선 선택 후 D로 가까운 해안에 하선`);
   if(type==="radarVehicle")rules.push("시야는 벽과 언덕에 차단되지만 탐지는 반경 안의 클로킹 유닛에 적용");
   return rules;
 }
@@ -731,6 +754,7 @@ function codexBuildingRules(type,stats){
   if(stats.unobstructedVision)rules.push("비차단 시야: 벽과 언덕의 시야 가림을 무시");
   if(stats.detection)rules.push(`클로킹 탐지: 반경 ${codexNumber(stats.detection)} 안의 클로킹 유닛을 탐지`);
   if(stats.targets?.length)rules.push(`${projectileEffectKind(type)==="shell"?"포탄":"총탄"} 공격 · ${codexTargets(stats.targets)} 대상 전용`);
+  if(stats.requiresWater)rules.push("해안 건설: 지상에 배치하되 건물 외곽이 물 타일에 인접한 위치에만 건설 가능");
   if(type==="hq")rules.push("시작 건물: 일꾼만 생산 가능하며 파괴되면 패배");
   return rules;
 }
@@ -762,7 +786,8 @@ function createCodexCard(type,stats,kind,includePortrait=false){
       take("healRate","초당 회복",value=>`${codexNumber(value)} HP`),
       take("healRange","회복 사거리"),
       take("splashRadius","스플래시 반경"),
-      take("splashFactor","주변 피해",value=>`${codexNumber(value*100)}%`)
+      take("splashFactor","주변 피해",value=>`${codexNumber(value*100)}%`),
+      take("transportCapacity","수송 정원",value=>`${codexNumber(value)} 인구`)
     ]);
     const producers=Object.values(BUILDING_TYPES).filter(building=>building.produces?.includes(type)).map(building=>building.name);
     appendCodexGroup(card,"시야 · 생산",[
@@ -780,7 +805,7 @@ function createCodexCard(type,stats,kind,includePortrait=false){
     ]);
     appendCodexTraits(card,codexUnitRules(type,stats));
   }else{
-    const category=type==="hq"?"시작 건물":["barracks","factory","airport"].includes(type)?"생산 건물":["resourceDepot"].includes(type)?"자원 건물":"방어 건물";
+    const category=type==="hq"?"시작 건물":["barracks","factory","airport","shipyard"].includes(type)?"생산 건물":["resourceDepot"].includes(type)?"자원 건물":"방어 건물";
     appendCodexGroup(card,"핵심 정보",[
       take("hp","체력",value=>`${codexNumber(value)} HP`),
       take("cost","건설 비용",value=>`${codexNumber(value)} 자원`),
@@ -788,7 +813,7 @@ function createCodexCard(type,stats,kind,includePortrait=false){
       take("vision","시야")
     ]);
     const dps=stats.damage>0&&stats.reload>0?stats.damage/stats.reload:0;
-    for(const key of ["damage","range","reload","targets","detection","unobstructedVision","produces","resourceDropoff"])
+    for(const key of ["damage","range","reload","targets","detection","unobstructedVision","produces","resourceDropoff","requiresWater"])
       if(Object.prototype.hasOwnProperty.call(stats,key))used.add(key);
     appendCodexGroup(card,"전투 · 탐지",[
       ["기본 피해",stats.damage!==undefined?codexNumber(stats.damage):"없음"],
@@ -877,6 +902,7 @@ function makeUnit(type,team,x,y){
     id:nextId++, kind:"unit", type, team, x,y, renderX:x, renderY:y,
     hp:s.hp,maxHp:s.hp,radius:s.radius, orders:[], cooldown:0,
     carry:0,gatherPhase:"toNode",gatherTick:0,lastGatherNodeId:null,
+    loadedIn:null,cargoIds:type==="transportShip"?[]:undefined,
     navPath:[],navPathIndex:0,navPathKey:"",navPathFailedKey:"",navPathRetry:0,navPathRadius:s.radius,navWaiting:false,
     navGoalX:x,navGoalY:y,navGoalProjected:false,
     shotCount:0,lastFireAt:-999,fireSerial:0,fireTargetId:null,fireTargetX:x,fireTargetY:y,
@@ -1573,6 +1599,7 @@ function exportState(sequence=snapshotSequence){
       id:u.id,type:u.type,team:u.team,x:u.x,y:u.y,hp:u.hp,maxHp:u.maxHp,radius:u.radius,
       orders:u.orders.map(o=>({...o})),cooldown:u.cooldown,shotCount:u.shotCount,lastFireAt:u.lastFireAt,
       carry:u.carry,gatherPhase:u.gatherPhase,gatherTick:u.gatherTick,lastGatherNodeId:u.lastGatherNodeId||null,
+      loadedIn:u.loadedIn||null,cargoIds:Array.isArray(u.cargoIds)?u.cargoIds.slice():undefined,
       facing:u.facing,turretFacing:u.turretFacing,fireSerial:u.fireSerial||0,
       fireTargetId:u.fireTargetId||null,fireTargetX:u.fireTargetX,fireTargetY:u.fireTargetY,fireEffectKind:u.fireEffectKind
     })),
@@ -1625,6 +1652,9 @@ function syncArrayInPlace(current,incoming,kind){
     }
     if(kind==="unit"){
       e.orders=Array.isArray(e.orders)?e.orders:[];e.cooldown=Number(e.cooldown)||0;
+      const loadedId=Number(e.loadedIn);
+      e.loadedIn=e.loadedIn!==null&&e.loadedIn!==undefined&&e.loadedIn!==""&&Number.isFinite(loadedId)?loadedId:null;
+      e.cargoIds=Array.isArray(e.cargoIds)?e.cargoIds.map(Number).filter(Number.isFinite):[];
       e.navPath=Array.isArray(e.navPath)?e.navPath:[];e.navPathIndex=Number(e.navPathIndex)||0;
       e.navPathKey=e.navPathKey||"";e.navPathFailedKey=e.navPathFailedKey||"";
       e.navPathRetry=Number(e.navPathRetry)||0;e.navPathRadius=e.navPathRadius||e.radius;e.navWaiting=false;
@@ -1752,13 +1782,13 @@ function sendOrApplyCommand(cmd){
    명령 검증/적용
 ========================= */
 function getEntity(id){
-  return units.find(u=>u.id===id&&u.hp>0) || buildings.find(b=>b.id===id&&b.hp>0) || null;
+  return units.find(u=>u.id===id&&u.hp>0&&!u.loadedIn) || buildings.find(b=>b.id===id&&b.hp>0) || null;
 }
 function getResourceNode(id){ return resourceNodes.find(r=>r.id===id)||null; }
 
 function unitsForIds(team,ids){
   const set=new Set(ids||[]);
-  return units.filter(u=>u.hp>0&&u.team===team&&set.has(u.id));
+  return units.filter(u=>u.hp>0&&!u.loadedIn&&u.team===team&&set.has(u.id));
 }
 function unitArmor(e){
   if(e.kind==="building") return "heavy";
@@ -1768,13 +1798,26 @@ function unitLayer(e){
   if(e.kind==="building") return "ground";
   return UNIT_TYPES[e.type]?.layer||"ground";
 }
+function buildingTouchesWater(x,y,radius){
+  const reach=radius+Math.max(12,TILE*.3);
+  const minX=Math.max(0,Math.floor((x-reach)/TILE)),maxX=Math.min(MAP_W-1,Math.floor((x+reach)/TILE));
+  const minY=Math.max(0,Math.floor((y-reach)/TILE)),maxY=Math.min(MAP_H-1,Math.floor((y+reach)/TILE));
+  for(let ty=minY;ty<=maxY;ty++)for(let tx=minX;tx<=maxX;tx++){
+    if(terrain[ty][tx]!==WATER)continue;
+    const left=tx*TILE,top=ty*TILE;
+    const closestX=Math.max(left,Math.min(x,left+TILE)),closestY=Math.max(top,Math.min(y,top+TILE));
+    if(Math.hypot(x-closestX,y-closestY)<=reach)return true;
+  }
+  return false;
+}
 function canPlaceBuilding(type,x,y){
   const s=BUILDING_TYPES[type];
   if(!s||type==="hq"||!positionClearOfBlockedTerrain(x,y,s.radius)) return false;
+  if(s.requiresWater&&!buildingTouchesWater(x,y,s.radius))return false;
   if(tileAtWorld(x,y)===RESOURCE) return false;
   for(const b of buildings) if(b.hp>0&&Math.hypot(x-b.x,y-b.y)<s.radius+b.radius+18) return false;
   for(const r of resourceNodes) if((typeof r.amount!=="number"||r.amount>0)&&Math.hypot(x-r.x,y-r.y)<s.radius+r.radius+16) return false;
-  for(const u of units) if(u.hp>0&&unitLayer(u)==="ground"&&Math.hypot(x-u.x,y-u.y)<s.radius+u.radius+4) return false;
+  for(const u of units) if(u.hp>0&&!u.loadedIn&&unitLayer(u)==="ground"&&Math.hypot(x-u.x,y-u.y)<s.radius+u.radius+4) return false;
   return true;
 }
 
@@ -1802,6 +1845,24 @@ function applyCommand(team,cmd){
     }
   }else if(cmd.type==="stop"){
     for(const u of unitsForIds(team,cmd.ids)){u.orders=[];invalidateNavPath(u);}
+  }else if(cmd.type==="boardTransport"){
+    const transport=units.find(u=>u.id===Number(cmd.targetId)&&u.hp>0&&!u.loadedIn&&u.team===team&&u.type==="transportShip");
+    if(!transport)return;
+    let assigned=false;
+    for(const u of unitsForIds(team,cmd.ids)){
+      if(u.id===transport.id||unitLayer(u)!=="ground")continue;
+      u.orders=[{type:"boardTransport",targetId:transport.id,x:transport.x,y:transport.y}];
+      invalidateNavPath(u);assigned=true;
+    }
+    if(assigned){transport.orders=[{type:"meetBoarders"}];invalidateNavPath(transport);}
+  }else if(cmd.type==="unloadTransport"){
+    for(const u of unitsForIds(team,cmd.ids).filter(u=>u.type==="transportShip"&&transportCargo(u).length)){
+      const requested=Number.isFinite(Number(cmd.x))&&Number.isFinite(Number(cmd.y))?
+        {x:Math.max(8,Math.min(WORLD_W-8,Number(cmd.x))),y:Math.max(8,Math.min(WORLD_H-8,Number(cmd.y)))}:
+        nearestTransportUnloadTarget(u);
+      if(!requested)continue;
+      u.orders=[{type:"unloadTransport",x:requested.x,y:requested.y}];invalidateNavPath(u);
+    }
   }else if(cmd.type==="gather"){
     const node=getResourceNode(cmd.nodeId);
     if(!node||node.amount<=0) return;
@@ -1989,6 +2050,106 @@ function segmentClearForUnit(ax,ay,bx,by,radius,ignoreBuildingId=null){
   return segmentClearOfTerrain(ax,ay,bx,by,radius)&&
     segmentClearOfBuildings(ax,ay,bx,by,radius,ignoreBuildingId);
 }
+function positionClearOfNavalTerrain(x,y,radius){
+  if(x-radius<2||y-radius<2||x+radius>WORLD_W-2||y+radius>WORLD_H-2||tileAtWorld(x,y)!==WATER)return false;
+  const minX=Math.max(0,Math.floor((x-radius)/TILE)),maxX=Math.min(MAP_W-1,Math.floor((x+radius)/TILE));
+  const minY=Math.max(0,Math.floor((y-radius)/TILE)),maxY=Math.min(MAP_H-1,Math.floor((y+radius)/TILE));
+  for(let ty=minY;ty<=maxY;ty++)for(let tx=minX;tx<=maxX;tx++){
+    if(terrain[ty][tx]!==WATER&&circleOverlapsTile(x,y,radius,tx,ty))return false;
+  }
+  return true;
+}
+function positionClearForNaval(x,y,radius,ignoreBuildingId=null){
+  return positionClearOfNavalTerrain(x,y,radius)&&positionClearOfBuildings(x,y,radius,ignoreBuildingId);
+}
+function segmentClearForNaval(ax,ay,bx,by,radius,ignoreBuildingId=null){
+  if(!segmentClearOfBuildings(ax,ay,bx,by,radius,ignoreBuildingId))return false;
+  const dx=bx-ax,dy=by-ay,distance=Math.hypot(dx,dy),steps=Math.max(1,Math.ceil(distance/Math.max(5,radius*.35)));
+  for(let i=1;i<=steps;i++)if(!positionClearOfNavalTerrain(ax+dx*i/steps,ay+dy*i/steps,radius))return false;
+  return true;
+}
+function findNavalPath(startX,startY,goalX,goalY,radius,allowClosest=true,startRadius=radius){
+  if(positionClearForNaval(goalX,goalY,radius)&&segmentClearForNaval(startX,startY,goalX,goalY,radius))return[{x:goalX,y:goalY}];
+  const cols=MAP_W,rows=MAP_H,total=cols*rows,startTx=Math.floor(startX/TILE),startTy=Math.floor(startY/TILE);
+  const startIndex=startTy*cols+startTx,gScore=new Float64Array(total),parent=new Int32Array(total),closed=new Uint8Array(total);
+  gScore.fill(Infinity);parent.fill(-1);
+  const job={heapIndex:[],heapF:[],heapSize:0,poppedF:0},center=index=>({x:(index%cols+.5)*TILE,y:(Math.floor(index/cols)+.5)*TILE});
+  const startCenter=center(startIndex);
+  if(startTx<0||startTy<0||startTx>=cols||startTy>=rows||!positionClearForNaval(startCenter.x,startCenter.y,radius)||
+    !segmentClearForNaval(startX,startY,startCenter.x,startCenter.y,startRadius))return null;
+  const exactGoal=positionClearForNaval(goalX,goalY,radius);
+  gScore[startIndex]=0;parent[startIndex]=-2;navJobPush(job,startIndex,Math.hypot(goalX-startCenter.x,goalY-startCenter.y));
+  let bestIndex=startIndex,bestDistance=Math.hypot(goalX-startCenter.x,goalY-startCenter.y),reachedExact=false;
+  while(job.heapSize){
+    const current=navJobPop(job);if(closed[current])continue;closed[current]=1;
+    const cp=center(current),distanceToGoal=Math.hypot(goalX-cp.x,goalY-cp.y);
+    if(distanceToGoal<bestDistance){bestDistance=distanceToGoal;bestIndex=current;}
+    if(exactGoal&&segmentClearForNaval(cp.x,cp.y,goalX,goalY,radius)){bestIndex=current;reachedExact=true;break;}
+    const cx=current%cols,cy=Math.floor(current/cols);
+    for(const [dx,dy] of NAV_DIRECTIONS){
+      const nx=cx+dx,ny=cy+dy;if(nx<0||ny<0||nx>=cols||ny>=rows)continue;
+      const next=ny*cols+nx;if(closed[next])continue;
+      const np=center(next);if(!positionClearForNaval(np.x,np.y,radius)||!segmentClearForNaval(cp.x,cp.y,np.x,np.y,radius))continue;
+      const nextScore=gScore[current]+Math.hypot(dx,dy)*TILE;
+      if(nextScore>=gScore[next])continue;
+      gScore[next]=nextScore;parent[next]=current;
+      navJobPush(job,next,nextScore+Math.hypot(goalX-np.x,goalY-np.y));
+    }
+  }
+  if(!reachedExact&&!allowClosest)return null;
+  const reversed=[];
+  for(let current=bestIndex;current>=0&&current!==startIndex;current=parent[current])reversed.push(center(current));
+  reversed.reverse();
+  if(reachedExact)reversed.push({x:goalX,y:goalY});
+  if(!reversed.length)reversed.push({x:startX,y:startY});
+  const points=[{x:startX,y:startY},...reversed],smooth=[];
+  for(let i=0;i<points.length-1;){
+    let next=i===0?Math.min(points.length-1,i+1):points.length-1;
+    const connectorRadius=i===0?startRadius:radius;
+    while(next>i+1&&!segmentClearForNaval(points[i].x,points[i].y,points[next].x,points[next].y,connectorRadius))next--;
+    smooth.push(points[next]);i=next;
+  }
+  if(!reachedExact)smooth.projectedGoal=true;
+  return smooth;
+}
+function requestNavalPath(u,tx,ty,pathRadius,allowNearestReachable){
+  const routeKey=`${navObstacleRevision}:${Math.floor(u.x/TILE)},${Math.floor(u.y/TILE)}>${tx.toFixed(1)},${ty.toFixed(1)}:${pathRadius}:${allowNearestReachable?1:0}`;
+  let path=navalPathCache.get(routeKey);
+  if(path){
+    const copy=path.map(point=>({...point}));if(path.projectedGoal)copy.projectedGoal=true;path=copy;
+    if(path.length&&!segmentClearForNaval(u.x,u.y,path[0].x,path[0].y,u.radius))path=null;
+  }
+  if(!path){
+    path=findNavalPath(u.x,u.y,tx,ty,pathRadius,allowNearestReachable,u.radius);
+    if(path&&!(path.projectedGoal&&path.length===1)){
+      const stored=path.map(point=>({...point}));if(path.projectedGoal)stored.projectedGoal=true;
+      navalPathCache.set(routeKey,stored);
+      while(navalPathCache.size>96)navalPathCache.delete(navalPathCache.keys().next().value);
+    }
+  }
+  return path;
+}
+function moveNavalAlongPath(u,tx,ty,arrivalRadius,dt,key="move",allowNearestReachable=true){
+  const pathKey=`naval:${navObstacleRevision}:${key}:${Math.round(tx/8)},${Math.round(ty/8)}:${Math.round(arrivalRadius)}`;
+  if(u.navPathKey!==pathKey){
+    let pathRadius=u.radius+NAVAL_CLEARANCE;
+    let path=requestNavalPath(u,tx,ty,pathRadius,allowNearestReachable);
+    if(!path){pathRadius=u.radius+MIN_NAV_CLEARANCE;path=requestNavalPath(u,tx,ty,pathRadius,allowNearestReachable);}
+    if(!path){pathRadius=u.radius;path=requestNavalPath(u,tx,ty,pathRadius,allowNearestReachable);}
+    if(!path){u.navPath=[];u.navPathKey="";u.navGoalProjected=false;return false;}
+    u.navPathKey=pathKey;u.navPath=path;u.navPathIndex=0;u.navPathRadius=pathRadius;
+    const goal=path[path.length-1]||{x:u.x,y:u.y};u.navGoalX=goal.x;u.navGoalY=goal.y;u.navGoalProjected=!!path.projectedGoal;
+  }
+  while(u.navPathIndex<u.navPath.length){
+    while(u.navPathIndex+1<u.navPath.length){
+      const later=u.navPath[u.navPathIndex+1];if(!segmentClearForNaval(u.x,u.y,later.x,later.y,u.navPathRadius||u.radius))break;u.navPathIndex++;
+    }
+    const waypoint=u.navPath[u.navPathIndex];
+    if(Math.hypot(u.x-waypoint.x,u.y-waypoint.y)<=2){u.x=waypoint.x;u.y=waypoint.y;u.navPathIndex++;continue;}
+    moveToward(u,waypoint.x,waypoint.y,dt);return false;
+  }
+  return u.navGoalProjected?Math.hypot(u.x-u.navGoalX,u.y-u.navGoalY)<=3:Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius;
+}
 function chooseApproachPoint(u,tx,ty,arrivalRadius,navigationRadius=u.radius){
   const s=UNIT_TYPES[u.type];
   if(s.layer==="air"){
@@ -2011,7 +2172,7 @@ function chooseApproachPoint(u,tx,ty,arrivalRadius,navigationRadius=u.radius){
 const NAV_DIRECTIONS=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
 function clearNavigationCache(clearTerrain=false){
   navObstacleRevision++;
-  navPathCache.clear();navSharedFieldCache.clear();navPendingJobs.length=0;
+  navPathCache.clear();navSharedFieldCache.clear();navalPathCache.clear();navPendingJobs.length=0;
   if(clearTerrain){navTerrainWalkabilityCache.clear();navTerrainEdgeCache.clear();}
 }
 function trimNavigationCache(){
@@ -2434,6 +2595,7 @@ function sharedNavigationRadius(radius){
   return Math.max(17,Math.ceil(radius));
 }
 function movementCrossesTerrainLevel(u,requiredTerrain){
+  if(unitLayer(u)!=="ground")return false;
   if(requiredTerrain===null||requiredTerrain===undefined)return false;
   const current=movementTerrain(tileAtWorld(u.x,u.y));
   return current!==requiredTerrain&&
@@ -2441,10 +2603,11 @@ function movementCrossesTerrainLevel(u,requiredTerrain){
     (requiredTerrain===GROUND||requiredTerrain===HILL||requiredTerrain===RAMP);
 }
 function movementTerrainRequirementSatisfied(u,requiredTerrain){
-  if(requiredTerrain===null||requiredTerrain===undefined||UNIT_TYPES[u.type].layer==="air")return true;
+  if(requiredTerrain===null||requiredTerrain===undefined||UNIT_TYPES[u.type].layer!=="ground")return true;
   return movementTerrain(tileAtWorld(u.x,u.y))===requiredTerrain;
 }
 function moveUnitAlongPath(u,tx,ty,arrivalRadius,dt,key="move",requiredTerrain=null,allowNearestReachable=false){
+  if(UNIT_TYPES[u.type].layer==="naval")return moveNavalAlongPath(u,tx,ty,arrivalRadius,dt,key,true);
   if(UNIT_TYPES[u.type].layer==="air"){
     moveToward(u,tx,ty,dt);
     return Math.hypot(u.x-tx,u.y-ty)<=arrivalRadius;
@@ -2518,7 +2681,7 @@ function hasLineOfSight(ax,ay,bx,by){
 }
 function visionSources(team){
   const arr=[];
-  for(const u of units) if(u.team===team&&u.hp>0){
+  for(const u of units) if(u.team===team&&u.hp>0&&!u.loadedIn){
     const s=UNIT_TYPES[u.type];
     arr.push({x:u.x,y:u.y,vision:s.vision,unobstructed:s.layer==="air"||s.unobstructedVision});
   }
@@ -2537,7 +2700,7 @@ function pointVisibleTo(team,x,y){
 function pointDetectedTo(team,x,y){
   for(const u of units){
     const detection=UNIT_TYPES[u.type]?.detection||0;
-    if(u.team===team&&u.hp>0&&detection>0&&Math.hypot(x-u.x,y-u.y)<=detection)return true;
+    if(u.team===team&&u.hp>0&&!u.loadedIn&&detection>0&&Math.hypot(x-u.x,y-u.y)<=detection)return true;
   }
   for(const b of buildings){
     const detection=BUILDING_TYPES[b.type]?.detection||0;
@@ -2635,7 +2798,8 @@ function moveToward(u,tx,ty,dt){
   const moveFacing=Math.atan2(dy,dx);
   const step=Math.min(d,UNIT_TYPES[u.type].speed*dt);
   const nx=u.x+dx/d*step,ny=u.y+dy/d*step;
-  if(UNIT_TYPES[u.type].layer==="air"||canStep(u.x,u.y,nx,ny,u.radius)){
+  const layer=UNIT_TYPES[u.type].layer;
+  if(layer==="air"||(layer==="naval"?segmentClearForNaval(u.x,u.y,nx,ny,u.radius):canStep(u.x,u.y,nx,ny,u.radius))){
     u.facing=moveFacing;
     if(u.type==="humvee"&&!u.aimingThisFrame)u.turretFacing=moveFacing;
     u.x=nx;u.y=ny;
@@ -2646,7 +2810,7 @@ function moveToward(u,tx,ty,dt){
 function nearestAttackable(u,maxRange){
   let best=null,bd=Infinity;
   for(const e of [...units,...buildings]){
-    if(e.hp<=0||e.team===u.team||!canAttackTarget(u,e)) continue;
+    if(e.hp<=0||e.loadedIn||e.team===u.team||!canAttackTarget(u,e)) continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
     if(d<=maxRange&&d<bd&&hasLineOfSight(u.x,u.y,e.x,e.y)&&entityVisibleTo(u.team,e)){
       best=e;bd=d;
@@ -2656,7 +2820,8 @@ function nearestAttackable(u,maxRange){
 }
 function canAttackTarget(attacker,target){
   const s=attacker.kind==="building"?BUILDING_TYPES[attacker.type]:UNIT_TYPES[attacker.type];
-  return !!s?.targets?.includes(unitLayer(target));
+  const layer=unitLayer(target);
+  return !!s?.targets?.includes(layer)||(layer==="naval"&&!!s?.targets?.includes("ground"));
 }
 function damageTypeMult(attacker,target){
   const armor=unitArmor(target);
@@ -2948,7 +3113,7 @@ function updateProjectiles(dt){
       const attackStats=attacker.kind==="building"?BUILDING_TYPES[attacker.type]:UNIT_TYPES[attacker.type];
       if(attackStats?.splashRadius>0){
         for(const e of [...units,...buildings]){
-          if(e.hp<=0||e.team===attacker.team||e.id===target.id||unitLayer(e)!=="ground") continue;
+          if(e.hp<=0||e.loadedIn||e.team===attacker.team||e.id===target.id||!["ground","naval"].includes(unitLayer(e))) continue;
           if(Math.hypot(e.x-target.x,e.y-target.y)<=attackStats.splashRadius+e.radius){
             applyDamage(attacker,e,p.baseDamage*(attackStats.splashFactor||.45),"폭발");
           }
@@ -3016,7 +3181,7 @@ function updateGather(u,o,dt){
 function nearestRepairable(u){
   let best=null,bd=90;
   for(const e of [...units,...buildings]){
-    if(e.team!==u.team||e.hp<=0||e.hp>=e.maxHp) continue;
+    if(e.team!==u.team||e.hp<=0||e.loadedIn||e.hp>=e.maxHp) continue;
     if(e.kind==="building"&&e.complete===false) continue;
     if(e.kind==="unit"&&unitArmor(e)!=="heavy") continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
@@ -3035,7 +3200,7 @@ function autoRepair(u,dt){
 }
 function updateGuestInteractionEffects(dt){
   for(const u of units){
-    if(u.hp<=0||(u.team!==localTeam&&!entityVisibleTo(localTeam,u)))continue;
+    if(u.hp<=0||u.loadedIn||(u.team!==localTeam&&!entityVisibleTo(localTeam,u)))continue;
     const order=u.orders?.[0];
     if(u.type==="worker"&&order?.type==="gather"&&u.gatherPhase==="mining"){
       const node=getResourceNode(order.targetId);
@@ -3069,7 +3234,7 @@ function updateGuestInteractionEffects(dt){
 function nearestHealable(u,maxRange){
   let best=null,bd=Infinity;
   for(const e of units){
-    if(e.hp<=0||e.team!==u.team||e.id===u.id||unitArmor(e)!=="human"||e.hp>=e.maxHp) continue;
+    if(e.hp<=0||e.loadedIn||e.team!==u.team||e.id===u.id||unitArmor(e)!=="human"||e.hp>=e.maxHp) continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
     if(d<=maxRange&&d<bd){best=e;bd=d;}
   }
@@ -3150,7 +3315,11 @@ function movementOrderStalled(u,o,dt){
   if(o.progressElapsed<.06)return false;
   const moved=Math.hypot(u.x-o.progressX,u.y-o.progressY),sampleTime=o.progressElapsed;
   if(moved<1)o.stalledTime=(o.stalledTime||0)+sampleTime;
-  else o.stalledTime=Math.max(0,(o.stalledTime||0)-sampleTime*2);
+  else{
+    o.stalledTime=Math.max(0,(o.stalledTime||0)-sampleTime*2);
+    o.recoveryTravel=(o.recoveryTravel||0)+moved;
+    if(o.recoveryTravel>=TILE*.75){o.recoveryAttempts=0;o.recoveryTravel=0;}
+  }
   o.progressX=u.x;o.progressY=u.y;o.progressElapsed=0;
   return o.stalledTime>=.24;
 }
@@ -3178,7 +3347,7 @@ function movementBoundaryEscapeDirection(u){
   let magnitude=Math.hypot(escapeX,escapeY);
   if(magnitude>.08)return{x:escapeX/magnitude,y:escapeY/magnitude,fromBoundary:true};
   for(const v of units){
-    if(v===u||v.hp<=0||v.team!==u.team||unitLayer(v)!==unitLayer(u))continue;
+    if(v===u||v.hp<=0||v.loadedIn||v.team!==u.team||unitLayer(v)!==unitLayer(u))continue;
     const dx=u.x-v.x,dy=u.y-v.y,distance=Math.hypot(dx,dy);
     if(distance<=0||distance>=maxProbe)continue;
     const weight=(maxProbe-distance)/maxProbe;
@@ -3193,6 +3362,8 @@ function movementBoundaryEscapeDirection(u){
   return{x:rays[0].dx,y:rays[0].dy,fromBoundary:false};
 }
 function beginMovementRecovery(u,o){
+  if(unitLayer(u)==="naval"){invalidateNavPath(u);resetMovementOrderProgress(u,o);return false;}
+  o.recoveryAttempts=(o.recoveryAttempts||0)+1;o.recoveryTravel=0;
   recoverStuckUnit(u);
   invalidateNavPath(u);resetMovementOrderProgress(u,o);
   const escape=movementBoundaryEscapeDirection(u),awayX=escape.x,awayY=escape.y;
@@ -3207,7 +3378,7 @@ function beginMovementRecovery(u,o){
       if(awayProgress<=0)continue;
       let crowdPenalty=0;
       for(const v of units){
-        if(v===u||v.hp<=0||v.team!==u.team||unitLayer(v)!==unitLayer(u))continue;
+        if(v===u||v.hp<=0||v.loadedIn||v.team!==u.team||unitLayer(v)!==unitLayer(u))continue;
         crowdPenalty+=Math.max(0,u.radius+v.radius+12-Math.hypot(x-v.x,y-v.y))*10;
       }
       const lineDeviation=Math.abs((x-u.x)*awayY-(y-u.y)*awayX);
@@ -3218,6 +3389,20 @@ function beginMovementRecovery(u,o){
   if(!best)return false;
   o.recoveryX=best.x;o.recoveryY=best.y;o.recoveryElapsed=0;
   return true;
+}
+function movementTargetBlockedForUnit(u,o){
+  const layer=unitLayer(u),terrainType=tileAtWorld(o.x,o.y);
+  if(layer==="air")return false;
+  if(layer==="naval")return terrainType!==WATER;
+  return isTerrainBlocked(terrainType);
+}
+function handleStalledMovement(u,o){
+  if(u.navGoalProjected||movementTargetBlockedForUnit(u,o)||(o.recoveryAttempts||0)>=1){
+    if(u.orders[0]===o)u.orders.shift();invalidateNavPath(u);return;
+  }
+  if(!beginMovementRecovery(u,o)){
+    if(u.orders[0]===o)u.orders.shift();invalidateNavPath(u);
+  }
 }
 function movementOrderTarget(u,o,dt){
   if(!Number.isFinite(o.recoveryX)||!Number.isFinite(o.recoveryY))return{x:o.x,y:o.y,recovering:false};
@@ -3234,7 +3419,7 @@ function movementGoalGroupKey(team,o){
 function collectMovementGoalGroups(){
   const groups=new Map();
   for(const u of units){
-    if(u.hp<=0)continue;
+    if(u.hp<=0||u.loadedIn)continue;
     const o=u.orders[0];
     if(o?.type!=="move"&&o?.type!=="attackMove")continue;
     const key=movementGoalGroupKey(u.team,o);
@@ -3252,17 +3437,216 @@ function movementGroupSettled(u,o,groups){
   for(const member of group)maxRadius=Math.max(maxRadius,member.radius);
   const clusterRadius=Math.min(110,Math.max(34,Math.sqrt(group.length)*maxRadius*1.5));
   if(distance>clusterRadius)return false;
-  const anchor=units.some(v=>v.hp>0&&v.team===u.team&&unitLayer(v)===layer&&
+  const anchor=units.some(v=>v.hp>0&&!v.loadedIn&&v.team===u.team&&unitLayer(v)===layer&&
     Math.hypot(v.x-goalX,v.y-goalY)<=v.radius+5);
   if(!anchor)return false;
-  return units.some(v=>v!==u&&v.hp>0&&v.team===u.team&&unitLayer(v)===layer&&
+  return units.some(v=>v!==u&&v.hp>0&&!v.loadedIn&&v.team===u.team&&unitLayer(v)===layer&&
     Math.hypot(v.x-goalX,v.y-goalY)<distance-1&&
     Math.hypot(v.x-u.x,v.y-u.y)<=u.radius+v.radius+14);
+}
+function transportCargo(transport){
+  if(!transport||transport.type!=="transportShip")return[];
+  const ids=Array.isArray(transport.cargoIds)?transport.cargoIds:[];
+  const cargo=ids.map(id=>units.find(u=>u.id===id&&u.hp>0&&u.loadedIn===transport.id)).filter(Boolean);
+  transport.cargoIds=cargo.map(u=>u.id);
+  return cargo;
+}
+function transportBoardingRange(transport,unit){
+  return transport.radius+unit.radius+NAV_CLEARANCE+Math.max(22,TILE*.4);
+}
+function transportBoardingWaterPoints(transport){
+  const startTX=Math.floor(transport.x/TILE),startTY=Math.floor(transport.y/TILE);
+  const cacheKey=`${navObstacleRevision}:${startTX},${startTY}:${Math.round(transport.radius)}`;
+  if(transport._boardingWaterKey===cacheKey&&Array.isArray(transport._boardingWaterPoints))return transport._boardingWaterPoints;
+  const queue=[{tx:startTX,ty:startTY,x:transport.x,y:transport.y}],visited=new Set([`${startTX},${startTY}`]),points=[];
+  for(let cursor=0;cursor<queue.length;cursor++){
+    const current=queue[cursor];
+    const centerX=(current.tx+.5)*TILE,centerY=(current.ty+.5)*TILE;
+    if(positionClearForNaval(centerX,centerY,transport.radius)&&
+      segmentClearForNaval(current.x,current.y,centerX,centerY,transport.radius)){
+      points.push({tx:current.tx,ty:current.ty,x:centerX,y:centerY});
+    }
+    for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1]]){
+      const tx=current.tx+dx,ty=current.ty+dy,key=`${tx},${ty}`;
+      if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H||visited.has(key)||terrain[ty][tx]!==WATER)continue;
+      const x=(tx+.5)*TILE,y=(ty+.5)*TILE;
+      if(!positionClearForNaval(x,y,transport.radius)||!segmentClearForNaval(current.x,current.y,x,y,transport.radius))continue;
+      visited.add(key);queue.push({tx,ty,x,y});
+    }
+  }
+  transport._boardingWaterKey=cacheKey;transport._boardingWaterPoints=points;
+  return points;
+}
+function boardingReachableLandTiles(unit){
+  const startTX=Math.floor(unit.x/TILE),startTY=Math.floor(unit.y/TILE),queue=[],visited=new Set();
+  const seeds=[];
+  for(let oy=-2;oy<=2;oy++)for(let ox=-2;ox<=2;ox++){
+    const tx=startTX+ox,ty=startTY+oy;
+    if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H||isTerrainBlocked(terrain[ty][tx]))continue;
+    const x=(tx+.5)*TILE,y=(ty+.5)*TILE;
+    if(positionClearForUnit(x,y,unit.radius)&&segmentClearForUnit(unit.x,unit.y,x,y,unit.radius))
+      seeds.push({tx,ty,x,y,distance:Math.hypot(x-unit.x,y-unit.y)});
+  }
+  seeds.sort((a,b)=>a.distance-b.distance);
+  for(const seed of seeds.slice(0,4)){
+    const key=`${seed.tx},${seed.ty}`;
+    if(visited.has(key))continue;
+    visited.add(key);queue.push(seed);
+  }
+  for(let cursor=0;cursor<queue.length;cursor++){
+    const current=queue[cursor];
+    for(const [dx,dy] of NAV_DIRECTIONS){
+      const tx=current.tx+dx,ty=current.ty+dy,key=`${tx},${ty}`;
+      if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H||visited.has(key)||isTerrainBlocked(terrain[ty][tx]))continue;
+      const x=(tx+.5)*TILE,y=(ty+.5)*TILE;
+      if(!positionClearForUnit(x,y,unit.radius)||!segmentClearForUnit(current.x,current.y,x,y,unit.radius))continue;
+      visited.add(key);queue.push({tx,ty,x,y});
+    }
+  }
+  return visited;
+}
+function findTransportBoardingRendezvous(transport,unit){
+  const waterPoints=transportBoardingWaterPoints(transport),reachable=boardingReachableLandTiles(unit);
+  let best=null,bestScore=Infinity;
+  for(const water of waterPoints){
+    for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1]]){
+      const landTX=water.tx+dx,landTY=water.ty+dy,key=`${landTX},${landTY}`;
+      if(landTX<0||landTY<0||landTX>=MAP_W||landTY>=MAP_H||!reachable.has(key)||isTerrainBlocked(terrain[landTY][landTX]))continue;
+      const landX=(landTX+.5)*TILE,landY=(landTY+.5)*TILE;
+      if(!positionClearForUnit(landX,landY,unit.radius))continue;
+      const unitDistance=Math.hypot(landX-unit.x,landY-unit.y),shipDistance=Math.hypot(water.x-transport.x,water.y-transport.y);
+      const score=unitDistance+shipDistance;
+      if(score<bestScore){bestScore=score;best={landX,landY,waterX:water.x,waterY:water.y,score};}
+    }
+  }
+  return best;
+}
+function boardingRendezvousForOrder(transport,unit,o){
+  if(o.boardMeetRevision===navObstacleRevision&&Number.isFinite(o.meetLandX)&&Number.isFinite(o.meetWaterX)){
+    return{landX:o.meetLandX,landY:o.meetLandY,waterX:o.meetWaterX,waterY:o.meetWaterY,score:o.meetScore||0};
+  }
+  if(o.boardMeetMissingRevision===navObstacleRevision)return null;
+  const meet=findTransportBoardingRendezvous(transport,unit);
+  if(!meet){o.boardMeetMissingRevision=navObstacleRevision;return null;}
+  delete o.boardMeetMissingRevision;
+  o.boardMeetRevision=navObstacleRevision;o.meetLandX=meet.landX;o.meetLandY=meet.landY;
+  o.meetWaterX=meet.waterX;o.meetWaterY=meet.waterY;o.meetScore=meet.score;
+  return meet;
+}
+function updateBoardTransport(u,o,dt){
+  const transport=units.find(v=>v.id===Number(o.targetId)&&v.hp>0&&!v.loadedIn&&v.team===u.team&&v.type==="transportShip");
+  if(!transport){u.orders.shift();invalidateNavPath(u);return;}
+  const cargo=transportCargo(transport),capacity=UNIT_TYPES.transportShip.transportCapacity;
+  o.x=transport.x;o.y=transport.y;
+  const arrival=transportBoardingRange(transport,u),distance=Math.hypot(transport.x-u.x,transport.y-u.y);
+  if(distance<=arrival){
+    if(cargo.length>=capacity){u.orders.shift();invalidateNavPath(u);return;}
+    u.loadedIn=transport.id;u.x=transport.x;u.y=transport.y;u.orders=[];invalidateNavPath(u);
+    if(!transport.cargoIds.includes(u.id))transport.cargoIds.push(u.id);
+    selectedIds=selectedIds.filter(id=>id!==u.id);
+    return;
+  }
+  const meet=boardingRendezvousForOrder(transport,u,o);
+  if(meet){
+    const requiredTerrain=movementTerrain(tileAtWorld(meet.landX,meet.landY));
+    moveUnitAlongPath(u,meet.landX,meet.landY,2,dt,`boardMeet:${transport.id}`,requiredTerrain,false);
+    return;
+  }
+  moveUnitAlongPath(u,transport.x,transport.y,arrival,dt,`boardFallback:${transport.id}`,null,true);
+}
+function updateTransportBoardingAssist(transport,o,dt){
+  const boarders=units.filter(unit=>unit.hp>0&&!unit.loadedIn&&unit.team===transport.team&&unitLayer(unit)==="ground"&&
+    unit.orders[0]?.type==="boardTransport"&&Number(unit.orders[0].targetId)===transport.id);
+  if(!boarders.length){transport.orders.shift();invalidateNavPath(transport);return;}
+  let chosen=null,chosenMeet=null,bestScore=Infinity;
+  for(const boarder of boarders){
+    const meet=boardingRendezvousForOrder(transport,boarder,boarder.orders[0]);
+    if(!meet)continue;
+    const score=Math.hypot(boarder.x-meet.landX,boarder.y-meet.landY)+Math.hypot(transport.x-meet.waterX,transport.y-meet.waterY);
+    if(score<bestScore){bestScore=score;chosen=boarder;chosenMeet=meet;}
+  }
+  if(!chosenMeet){
+    const nearest=boarders.reduce((best,unit)=>!best||Math.hypot(unit.x-transport.x,unit.y-transport.y)<Math.hypot(best.x-transport.x,best.y-transport.y)?unit:best,null);
+    moveUnitAlongPath(transport,nearest.x,nearest.y,2,dt,`meetBoarders:${nearest.id}`,null,true);
+    return;
+  }
+  o.x=chosenMeet.waterX;o.y=chosenMeet.waterY;o.targetId=chosen.id;
+  moveUnitAlongPath(transport,chosenMeet.waterX,chosenMeet.waterY,2,dt,`meetBoarders:${chosen.id}`,null,true);
+}
+function unloadPositionClear(x,y,u,chosen){
+  if(!positionClearForUnit(x,y,u.radius)||tileAtWorld(x,y)===WATER)return false;
+  for(const other of units){
+    if(other===u||other.hp<=0||other.loadedIn||unitLayer(other)!=="ground")continue;
+    if(Math.hypot(x-other.x,y-other.y)<(u.radius+other.radius)*.8+3)return false;
+  }
+  return !chosen.some(p=>Math.hypot(x-p.x,y-p.y)<u.radius+p.radius+4);
+}
+function nearestTransportUnloadTarget(transport){
+  const cargo=transportCargo(transport);
+  if(!cargo.length)return null;
+  const passengerRadius=Math.max(...cargo.map(unit=>unit.radius||10)),candidates=[],candidateKeys=new Set();
+  const startX=Math.floor(transport.x/TILE),startY=Math.floor(transport.y/TILE),queue=[[startX,startY]],visited=new Set([`${startX},${startY}`]);
+  for(let cursor=0;cursor<queue.length;cursor++){
+    const [wx,wy]=queue[cursor];
+    for(const [dx,dy] of [[-1,0],[1,0],[0,-1],[0,1]]){
+      const nx=wx+dx,ny=wy+dy,key=`${nx},${ny}`;
+      if(nx<0||ny<0||nx>=MAP_W||ny>=MAP_H||visited.has(key)||terrain[ny][nx]!==WATER)continue;
+      visited.add(key);queue.push([nx,ny]);
+    }
+    for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+      if(!dx&&!dy)continue;
+      const tx=wx+dx,ty=wy+dy,key=`${tx},${ty}`;
+      if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H||candidateKeys.has(key)||isTerrainBlocked(terrain[ty][tx]))continue;
+      const x=(tx+.5)*TILE,y=(ty+.5)*TILE;
+      if(!positionClearForUnit(x,y,passengerRadius))continue;
+      candidateKeys.add(key);candidates.push({x,y,distance:Math.hypot(x-transport.x,y-transport.y)});
+    }
+  }
+  candidates.sort((a,b)=>a.distance-b.distance);
+  return candidates[0]||null;
+}
+function findUnloadPosition(transport,u,targetX,targetY,chosen){
+  const base=Math.atan2(targetY-transport.y,targetX-transport.x),first=transport.radius+u.radius+8;
+  for(let distance=first;distance<=first+TILE*2.5;distance+=Math.max(9,u.radius*.65)){
+    for(let i=0;i<32;i++){
+      const offset=i===0?0:Math.ceil(i/2)*(i%2?1:-1)*Math.PI/16;
+      const x=transport.x+Math.cos(base+offset)*distance,y=transport.y+Math.sin(base+offset)*distance;
+      if(unloadPositionClear(x,y,u,chosen))return{x,y,radius:u.radius};
+    }
+  }
+  return null;
+}
+function unloadTransportCargo(transport,targetX,targetY){
+  const cargo=transportCargo(transport),chosen=[],remaining=[];
+  for(const passenger of cargo){
+    const spot=findUnloadPosition(transport,passenger,targetX,targetY,chosen);
+    if(!spot){remaining.push(passenger.id);continue;}
+    passenger.loadedIn=null;passenger.x=spot.x;passenger.y=spot.y;passenger.renderX=spot.x;passenger.renderY=spot.y;
+    passenger.orders=[];invalidateNavPath(passenger);chosen.push(spot);
+  }
+  transport.cargoIds=remaining;
+  return chosen.length;
+}
+function updateUnloadTransport(u,o,dt){
+  if(!transportCargo(u).length){u.orders.shift();invalidateNavPath(u);return;}
+  if(moveUnitAlongPath(u,o.x,o.y,2,dt,"unload",null,true)){
+    unloadTransportCargo(u,o.x,o.y);u.orders.shift();invalidateNavPath(u);
+  }
+}
+function canStepForUnit(u,nx,ny){
+  const layer=unitLayer(u);
+  return layer==="air"||(layer==="naval"?positionClearForNaval(nx,ny,u.radius+MIN_NAV_CLEARANCE):canStep(u.x,u.y,nx,ny,u.radius));
 }
 function updateUnits(dt,nowSec){
   const movementGroups=collectMovementGoalGroups();
   for(const u of units){
     if(u.hp<=0) continue;
+    if(u.loadedIn){
+      const transport=units.find(v=>v.id===u.loadedIn&&v.hp>0&&v.type==="transportShip");
+      if(!transport){u.hp=0;u._deathEffectPlayed=true;continue;}
+      u.x=transport.x;u.y=transport.y;u.renderX=transport.renderX??transport.x;u.renderY=transport.renderY??transport.y;
+      continue;
+    }
     u.aimingThisFrame=false;
     u.cooldown=Math.max(0,u.cooldown-dt);
     const o=u.orders[0];
@@ -3272,6 +3656,9 @@ function updateUnits(dt,nowSec){
     if(o?.type==="returnResources"&&u.type==="worker"){updateResourceReturn(u,o,dt);continue;}
     if(o?.type==="build"&&u.type==="worker"){updateBuildOrder(u,o,dt);continue;}
     if(o?.type==="healTarget"&&u.type==="medic"){updateHealTarget(u,o,dt);continue;}
+    if(o?.type==="boardTransport"&&unitLayer(u)==="ground"){updateBoardTransport(u,o,dt);continue;}
+    if(o?.type==="meetBoarders"&&u.type==="transportShip"){updateTransportBoardingAssist(u,o,dt);continue;}
+    if(o?.type==="unloadTransport"&&u.type==="transportShip"){updateUnloadTransport(u,o,dt);continue;}
     if(o?.type==="move"){
       if(UNIT_TYPES[u.type].fireWhileMoving){
         const target=nearestAttackable(u,UNIT_TYPES[u.type].range);
@@ -3282,7 +3669,7 @@ function updateUnits(dt,nowSec){
         target.recovering?null:movementOrderRequiredTerrain(o),!target.recovering);
       if(target.recovering&&arrived){clearMovementRecovery(u,o);continue;}
       if(arrived||(!target.recovering&&movementGroupSettled(u,o,movementGroups))){u.orders.shift();invalidateNavPath(u);}
-      else if(!target.recovering&&movementOrderStalled(u,o,dt))beginMovementRecovery(u,o);
+      else if(!target.recovering&&movementOrderStalled(u,o,dt))handleStalledMovement(u,o);
       continue;
     }
     if(o?.type==="attackTarget"){
@@ -3298,7 +3685,7 @@ function updateUnits(dt,nowSec){
           target.recovering?null:movementOrderRequiredTerrain(o),!target.recovering);
         if(target.recovering&&arrived){clearMovementRecovery(u,o);continue;}
         if(arrived||(!target.recovering&&movementGroupSettled(u,o,movementGroups))){u.orders.shift();invalidateNavPath(u);}
-        else if(!target.recovering&&movementOrderStalled(u,o,dt))beginMovementRecovery(u,o);
+        else if(!target.recovering&&movementOrderStalled(u,o,dt))handleStalledMovement(u,o);
       }
       continue;
     }
@@ -3312,16 +3699,16 @@ function updateUnits(dt,nowSec){
   }
 
   for(let i=0;i<units.length;i++){
-    const a=units[i]; if(a.hp<=0)continue;
+    const a=units[i]; if(a.hp<=0||a.loadedIn)continue;
     for(let j=i+1;j<units.length;j++){
-      const b=units[j]; if(b.hp<=0||a.team!==b.team)continue;
+      const b=units[j]; if(b.hp<=0||b.loadedIn||a.team!==b.team)continue;
       if(unitLayer(a)!==unitLayer(b)) continue;
       if(workersIgnoreCollisionWhileGathering(a,b)) continue;
       const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),minD=(a.radius+b.radius)*.75;
       if(d>0&&d<minD){
         const push=(minD-d)*.16,nx=dx/d,ny=dy/d;
-        if(canStep(a.x,a.y,a.x-nx*push,a.y-ny*push,a.radius)){a.x-=nx*push;a.y-=ny*push;}
-        if(canStep(b.x,b.y,b.x+nx*push,b.y+ny*push,b.radius)){b.x+=nx*push;b.y+=ny*push;}
+        if(canStepForUnit(a,a.x-nx*push,a.y-ny*push)){a.x-=nx*push;a.y-=ny*push;}
+        if(canStepForUnit(b,b.x+nx*push,b.y+ny*push)){b.x+=nx*push;b.y+=ny*push;}
       }
     }
   }
@@ -3368,7 +3755,14 @@ function groundSpawnPositionClear(building,x,y,s){
     if((typeof r.amount!=="number"||r.amount>0)&&Math.hypot(x-r.x,y-r.y)<s.radius+r.radius+6)return false;
   }
   for(const u of units){
-    if(u.hp>0&&unitLayer(u)==="ground"&&Math.hypot(x-u.x,y-u.y)<(s.radius+u.radius)*.8+3)return false;
+    if(u.hp>0&&!u.loadedIn&&unitLayer(u)==="ground"&&Math.hypot(x-u.x,y-u.y)<(s.radius+u.radius)*.8+3)return false;
+  }
+  return true;
+}
+function navalSpawnPositionClear(x,y,s){
+  if(!positionClearForNaval(x,y,s.radius+MIN_NAV_CLEARANCE))return false;
+  for(const u of units){
+    if(u.hp>0&&!u.loadedIn&&unitLayer(u)==="naval"&&Math.hypot(x-u.x,y-u.y)<(s.radius+u.radius)*.8+3)return false;
   }
   return true;
 }
@@ -3382,6 +3776,15 @@ function spawnNearBuilding(building,type){
         if(x<s.radius||y<s.radius||x>WORLD_W-s.radius||y>WORLD_H-s.radius)continue;
         if(units.some(u=>u.hp>0&&unitLayer(u)==="air"&&Math.hypot(x-u.x,y-u.y)<(s.radius+u.radius)*.8+3))continue;
         return makeUnit(type,building.team,x,y);
+      }
+    }
+    return null;
+  }
+  if(s.layer==="naval"){
+    for(let ring=firstRing;ring<=firstRing+TILE*5;ring+=Math.max(16,TILE/4)){
+      for(let k=0;k<40;k++){
+        const angle=preferred+k/40*Math.PI*2,x=building.x+Math.cos(angle)*ring,y=building.y+Math.sin(angle)*ring;
+        if(navalSpawnPositionClear(x,y,s))return makeUnit(type,building.team,x,y);
       }
     }
     return null;
@@ -3414,6 +3817,11 @@ function updateBuildings(dt,nowSec){
   }
 }
 function removeDead(){
+  for(const transport of units){
+    if(transport.hp>0||transport.type!=="transportShip")continue;
+    for(const passenger of transportCargo(transport)){passenger.hp=0;passenger._deathEffectPlayed=true;}
+    transport.cargoIds=[];
+  }
   for(const entity of [...units,...buildings]){
     if(entity.hp<=0&&!entity._deathEffectPlayed){
       entity._deathEffectPlayed=true;
@@ -3461,7 +3869,7 @@ function updateSoloAI(dt){
     aiBuildTimer=0;
     for(const type of ["barracks","factory","airport"]){
       if(buildings.some(b=>b.team===team&&b.type===type&&b.hp>0))continue;
-      const worker=units.find(u=>u.team===team&&u.type==="worker"&&u.hp>0),site=findAIBuildSite(team,type);
+      const worker=units.find(u=>u.team===team&&u.type==="worker"&&u.hp>0&&!u.loadedIn),site=findAIBuildSite(team,type);
       if(worker&&site&&teamResources[team]>=BUILDING_TYPES[type].cost){
         applyCommand(team,{type:"build",ids:[worker.id],buildingType:type,x:site.x,y:site.y});
       }
@@ -3475,7 +3883,7 @@ function updateSoloAI(dt){
   }
   if(aiWaveTimer>10){
     aiWaveTimer=0;
-    const army=units.filter(u=>u.team===1&&u.type!=="worker");
+    const army=units.filter(u=>u.team===1&&u.type!=="worker"&&!u.loadedIn);
     if(army.length>=3){
       const wavePoints=[
         {x:26*TILE,y:12*TILE},
@@ -3560,10 +3968,29 @@ function updateMouseWorldPosition(){
 }
 function selectedEntities(){
   const set=new Set(selectedIds);
-  return [...units,...buildings].filter(e=>set.has(e.id)&&e.hp>0);
+  return [...units,...buildings].filter(e=>set.has(e.id)&&e.hp>0&&!e.loadedIn);
 }
 function selectedOwnUnitIds(){
   return selectedEntities().filter(e=>e.kind==="unit"&&e.team===localTeam).map(e=>e.id);
+}
+function selectedOwnTransports(){
+  return selectedEntities().filter(e=>e.kind==="unit"&&e.team===localTeam&&e.type==="transportShip");
+}
+function issueSelectedTransportDrop(){
+  if(!started||gameOver||gamePaused||infoModalOpen())return false;
+  const transports=selectedOwnTransports().filter(transport=>transportCargo(transport).length>0);
+  if(!transports.length)return false;
+  sendOrApplyCommand({type:"unloadTransport",ids:transports.map(transport=>transport.id)});
+  return true;
+}
+function updateTransportDropButton(){
+  const transports=started&&!gameOver?selectedOwnTransports():[];
+  const capacity=transports.reduce((sum,transport)=>sum+(UNIT_TYPES[transport.type].transportCapacity||0),0);
+  const cargo=transports.reduce((sum,transport)=>sum+transportCargo(transport).length,0);
+  dropUnitsBtn.classList.toggle("show",transports.length>0);
+  dropUnitsBtn.classList.toggle("ready",cargo>0&&!gamePaused);
+  dropUnitsBtn.disabled=cargo<=0||gamePaused;
+  dropUnitsBtn.textContent=`유닛 드랍 (D) · 탑승 ${cargo}/${capacity||UNIT_TYPES.transportShip.transportCapacity}`;
 }
 function controlGroupNumberFromEvent(e){
   const match=/^(?:Digit|Numpad)([0-9])$/.exec(e.code||"");
@@ -3598,7 +4025,7 @@ function clearSelection(){selectedIds=[];}
 function entityAtWorld(x,y,team){
   let best=null,bd=Infinity;
   for(const e of [...units,...buildings]){
-    if(e.hp<=0||e.team!==team)continue;
+    if(e.hp<=0||e.loadedIn||e.team!==team)continue;
     const d=Math.hypot(x-e.x,y-e.y);
     if(d<=e.radius+8&&d<bd){best=e;bd=d;}
   }
@@ -3607,7 +4034,7 @@ function entityAtWorld(x,y,team){
 function enemyEntityAtWorld(x,y,team){
   let best=null,bd=Infinity;
   for(const e of [...units,...buildings]){
-    if(e.team===team||(typeof e.hp==="number"&&e.hp<=0)) continue;
+    if(e.loadedIn||e.team===team||(typeof e.hp==="number"&&e.hp<=0)) continue;
     if(e.kind==="unit"&&!entityVisibleTo(team,e)) continue;
     if(e.kind==="building"&&e.type!=="hq"&&!entityVisibleTo(team,e)) continue;
     const p=displayPos(e),d=Math.hypot(x-p.x,y-p.y);
@@ -3664,14 +4091,18 @@ canvas.addEventListener("wheel",e=>{
   updateMouseWorldPosition();
 },{passive:false});
 canvas.addEventListener("mouseup",e=>{
-  if(!started||gameOver||gamePaused)return;
+  if(!started||gameOver||gamePaused){
+    if(e.button===0){minimapDragging=false;mouse.down=false;mouse.drag=false;}
+    return;
+  }
   const p=eventScreenPoint(e);
   if(e.button===0&&minimapDragging){
     centerCameraFromMinimap(p.x,p.y);
     minimapDragging=false;mouse.down=false;mouse.drag=false;
     return;
   }
-  if(pointInMinimap(p.x,p.y))return;
+  // 월드에서 시작한 드래그는 미니맵 위에서 버튼을 놓아도 선택을 확정해야 한다.
+  if(pointInMinimap(p.x,p.y)&&!(e.button===0&&mouse.down))return;
   const w=screenToWorld(p.x,p.y);
 
   if(e.button===0&&mouse.down){
@@ -3696,7 +4127,7 @@ canvas.addEventListener("mouseup",e=>{
       const start=screenToWorld(mouse.startX,mouse.startY),end=screenToWorld(p.x,p.y);
       const x1=Math.min(start.x,end.x),y1=Math.min(start.y,end.y);
       const x2=Math.max(start.x,end.x),y2=Math.max(start.y,end.y);
-      selectedIds=units.filter(u=>u.team===localTeam&&u.x>=x1&&u.x<=x2&&u.y>=y1&&u.y<=y2).map(u=>u.id);
+      selectedIds=units.filter(u=>u.team===localTeam&&!u.loadedIn&&u.x>=x1&&u.x<=x2&&u.y>=y1&&u.y<=y2).map(u=>u.id);
     }else{
       const hit=entityAtWorld(w.x,w.y,localTeam);
       if(hit){
@@ -3724,6 +4155,13 @@ canvas.addEventListener("mouseup",e=>{
       return;
     }
     const ally=entityAtWorld(w.x,w.y,localTeam);
+    if(ally?.kind==="unit"&&ally.type==="transportShip"){
+      const passengers=us.filter(u=>u.id!==ally.id&&unitLayer(u)==="ground");
+      if(passengers.length){
+        sendOrApplyCommand({type:"boardTransport",ids:passengers.map(u=>u.id),targetId:ally.id});
+        return;
+      }
+    }
     if(ally?.kind==="building"&&ally.complete===false&&workers.length){
       sendOrApplyCommand({type:"assistBuild",ids:workers.map(u=>u.id),targetId:ally.id});
       return;
@@ -3761,6 +4199,10 @@ addEventListener("keydown",e=>{
   if(e.key.toLowerCase()==="p"&&started&&!e.repeat){
     e.preventDefault();
     toggleFullscreenAndPointerLock();
+    return;
+  }
+  if(e.key.toLowerCase()==="d"&&started&&!e.repeat){
+    if(issueSelectedTransportDrop())e.preventDefault();
     return;
   }
   if(e.key==="Shift"&&started&&!e.repeat&&activeBuildCategory){
@@ -3891,6 +4333,7 @@ function drawResource(r){
 }
 function paintBuildingModel(renderCtx,b,r,selected=false,label=""){
   const accent=b.type==="barracks"?"#6d8f58":b.type==="factory"?"#667483":b.type==="airport"?"#6d67a0":
+    b.type==="shipyard"?"#39768a":
     b.type==="groundTurret"?"#7d6848":b.type==="radar"?"#397f82":b.type==="aaTurret"?"#735d83":
     b.type==="resourceDepot"?"#9a7134":"#4b8ddb";
   renderCtx.fillStyle=b.team===localTeam?accent:"#b95050";
@@ -3899,6 +4342,11 @@ function paintBuildingModel(renderCtx,b,r,selected=false,label=""){
   if(b.type==="airport"){
     renderCtx.strokeStyle="rgba(255,255,255,.55)";renderCtx.lineWidth=4;
     renderCtx.beginPath();renderCtx.moveTo(-r+10,0);renderCtx.lineTo(r-10,0);renderCtx.moveTo(0,-r+10);renderCtx.lineTo(0,r-10);renderCtx.stroke();
+  }else if(b.type==="shipyard"){
+    renderCtx.fillStyle="rgba(8,28,38,.62)";renderCtx.fillRect(-r*.68,-r*.48,r*1.36,r*.96);
+    renderCtx.strokeStyle="rgba(157,231,255,.8)";renderCtx.lineWidth=3;
+    renderCtx.beginPath();renderCtx.moveTo(-r*.68,-r*.48);renderCtx.lineTo(r*.7,0);renderCtx.lineTo(-r*.68,r*.48);renderCtx.stroke();
+    renderCtx.fillStyle="rgba(220,245,255,.55)";renderCtx.fillRect(-r*.72,-r*.62,r*.18,r*1.24);
   }else if(b.type==="groundTurret"){
     renderCtx.fillStyle="rgba(15,20,22,.62)";renderCtx.beginPath();renderCtx.arc(0,0,r*.5,0,Math.PI*2);renderCtx.fill();
     renderCtx.save();renderCtx.rotate(b.renderTurretFacing??b.turretFacing??0);
@@ -3954,12 +4402,23 @@ function unitColor(u){
   if(u.type==="humvee")return u.team===localTeam?"#d1aa57":"#c96b55";
   if(u.type==="lightAircraft")return u.team===localTeam?"#a7d8e8":"#e8a7a7";
   if(u.type==="stealthFighter")return u.team===localTeam?"#7183a8":"#a27088";
+  if(u.type==="fastBoat")return u.team===localTeam?"#4fb8d1":"#d26969";
+  if(u.type==="transportShip")return u.team===localTeam?"#4d829b":"#a95f62";
   return u.team===localTeam?"#78b8ff":"#ff7777";
 }
 function paintUnitModel(renderCtx,u,bodyFacing=0,turretFacing=bodyFacing,selected=false){
   const bodyColor=unitColor(u),outline=selected?"#fff":"rgba(0,0,0,.55)";
   renderCtx.save();renderCtx.rotate(bodyFacing);renderCtx.fillStyle=bodyColor;renderCtx.strokeStyle=outline;renderCtx.lineWidth=selected?3:2;
-  if(u.type==="heavyTank"){
+  if(u.type==="fastBoat"){
+    renderCtx.beginPath();renderCtx.moveTo(23,0);renderCtx.lineTo(8,12);renderCtx.lineTo(-20,9);renderCtx.lineTo(-15,0);renderCtx.lineTo(-20,-9);renderCtx.lineTo(8,-12);renderCtx.closePath();renderCtx.fill();renderCtx.stroke();
+    renderCtx.fillStyle="rgba(220,245,255,.38)";renderCtx.fillRect(-3,-7,11,14);
+    renderCtx.strokeStyle="#19323d";renderCtx.lineWidth=3;renderCtx.beginPath();renderCtx.moveTo(4,0);renderCtx.lineTo(23,0);renderCtx.stroke();
+  }else if(u.type==="transportShip"){
+    renderCtx.beginPath();renderCtx.moveTo(26,0);renderCtx.lineTo(12,16);renderCtx.lineTo(-24,13);renderCtx.lineTo(-29,0);renderCtx.lineTo(-24,-13);renderCtx.lineTo(12,-16);renderCtx.closePath();renderCtx.fill();renderCtx.stroke();
+    renderCtx.fillStyle="rgba(12,31,39,.55)";renderCtx.fillRect(-15,-9,24,18);
+    renderCtx.strokeStyle="rgba(220,245,255,.65)";renderCtx.lineWidth=2;renderCtx.strokeRect(-15,-9,24,18);
+    renderCtx.fillStyle="rgba(220,245,255,.5)";renderCtx.fillRect(10,-6,8,12);
+  }else if(u.type==="heavyTank"){
     renderCtx.fillRect(-18,-13,36,26);renderCtx.strokeRect(-18,-13,36,26);
     renderCtx.fillStyle="rgba(20,20,20,.42)";renderCtx.fillRect(-16,-17,31,5);renderCtx.fillRect(-16,12,31,5);
     renderCtx.beginPath();renderCtx.arc(2,0,8,0,Math.PI*2);renderCtx.fill();
@@ -4031,7 +4490,7 @@ function drawCodexPortrait(portrait,type,kind){
   portraitCtx.restore();
 }
 function drawUnit(u){
-  if(u.hp<=0||!entityVisibleTo(localTeam,u))return;
+  if(u.hp<=0||u.loadedIn||!entityVisibleTo(localTeam,u))return;
   const p=displayPos(u),s=worldToScreen(p.x,p.y),sel=selectedIds.includes(u.id);
   ctx.save();ctx.translate(s.x,s.y);
   if(UNIT_TYPES[u.type].cloaked&&u.team===localTeam)ctx.globalAlpha=.7;
@@ -4040,6 +4499,13 @@ function drawUnit(u){
   paintUnitModel(ctx,u,bodyFacing,turretFacing,sel);
   ctx.fillStyle="#fff";ctx.font="10px sans-serif";ctx.textAlign="center";ctx.fillText(UNIT_TYPES[u.type].name,0,u.radius+16);
   if(u.type==="worker"&&u.carry>0){ctx.fillStyle="#9ee7ff";ctx.font="bold 9px sans-serif";ctx.fillText(u.carry.toFixed(1),0,-u.radius-18);}
+  if(u.type==="transportShip"&&u.team===localTeam){
+    const count=transportCargo(u).length,capacity=UNIT_TYPES.transportShip.transportCapacity,label=`탑승 ${count}/${capacity} · D`;
+    ctx.font="bold 10px sans-serif";const width=Math.max(68,ctx.measureText(label).width+12),y=-u.radius-36;
+    ctx.fillStyle="rgba(5,18,24,.9)";ctx.fillRect(-width/2,y,width,15);
+    ctx.strokeStyle=count?"#6de4ff":"rgba(255,255,255,.28)";ctx.lineWidth=1;ctx.strokeRect(-width/2+.5,y+.5,width-1,14);
+    ctx.fillStyle=count?"#dffaff":"#9cafb8";ctx.textAlign="center";ctx.fillText(label,0,y+11);
+  }
   ctx.restore();drawHealth(u,s.x,s.y,34);
 
   if(sel&&u.orders?.length){
@@ -4099,7 +4565,7 @@ function drawVirtualCursor(){
 
 const ACTION_HOTKEYS=["Z","X","C","V","B"];
 const buildCategories=[
-  {key:"production",name:"생산건물",types:["barracks","factory","airport"]},
+  {key:"production",name:"생산건물",types:["barracks","factory","airport","shipyard"]},
   {key:"defense",name:"방어건물",types:["groundTurret","radar","aaTurret"]},
   {key:"resource",name:"자원",types:["resourceDepot"]}
 ];
@@ -4236,7 +4702,8 @@ function drawHUD(){
     ctx.textAlign="left";ctx.fillStyle="#fff";ctx.font="bold 13px sans-serif";
     const selectedProduces=selectedBuilding?(BUILDING_TYPES[selectedBuilding.type]?.produces||[]):[];
     const activeCategoryName=buildCategories.find(category=>category.key===activeBuildCategory)?.name;
-    const buildingRole=selectedBuilding&&BUILDING_TYPES[selectedBuilding.type]?.resourceDropoff&&selectedBuilding.type!=="hq"?"자원 시설":"방어 시설";
+    const buildingStats=selectedBuilding?BUILDING_TYPES[selectedBuilding.type]:null;
+    const buildingRole=buildingStats?.produces?.length?"생산 시설":buildingStats?.resourceDropoff&&selectedBuilding.type!=="hq"?"자원 시설":"방어 시설";
     const title=selectedBuilding?`${selectedBuilding.name} ${selectedBuilding.complete?(selectedProduces.length?"생산":buildingRole):"건설 중"}`:
       `일꾼 건설${activeCategoryName?` › ${activeCategoryName}`:""} · ${selectedWorkers.length}명`;
     ctx.fillText(title,p.x+18,p.y+25);
@@ -4285,7 +4752,9 @@ function drawHUD(){
     ctx.fillStyle="rgba(8,12,15,.78)";ctx.fillRect(12,innerHeight-76,430,62);
     ctx.strokeStyle="rgba(255,255,255,.12)";ctx.strokeRect(12.5,innerHeight-75.5,429,61);
     ctx.textAlign="left";ctx.fillStyle="#fff";ctx.font="bold 13px sans-serif";ctx.fillText(`${s.name}  HP ${Math.ceil(u.hp)} / ${u.maxHp}`,24,innerHeight-52);
-    ctx.font="11px sans-serif";ctx.fillStyle="#b9c7d0";ctx.fillText(s.special,24,innerHeight-31);
+    ctx.font="11px sans-serif";ctx.fillStyle="#b9c7d0";
+    const cargoText=u.type==="transportShip"?` · 탑승 ${transportCargo(u).length}/${s.transportCapacity}`:"";
+    ctx.fillText(s.special+cargoText,24,innerHeight-31);
   }
 
   if(gameOver){
@@ -4434,7 +4903,7 @@ function drawMinimap(){
     ctx.fillRect(x-size/2,y-size/2,size,size);
   }
   for(const unit of units){
-    if(unit.hp<=0||!entityVisibleTo(localTeam,unit))continue;
+    if(unit.hp<=0||unit.loadedIn||!entityVisibleTo(localTeam,unit))continue;
     const p=displayPos(unit),x=rect.x+p.x*scaleX,y=rect.y+p.y*scaleY;
     ctx.fillStyle=unit.team===localTeam?"#9be3ff":"#ff8b8b";
     ctx.beginPath();ctx.arc(x,y,unitLayer(unit)==="air"?2.5:1.8,0,Math.PI*2);ctx.fill();
@@ -4464,6 +4933,7 @@ function draw(){
   ctx.restore();
   drawSelectionBox();
   drawHUD();
+  updateTransportDropButton();
   drawMinimap();
   drawVirtualCursor();
 }

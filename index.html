@@ -1081,6 +1081,7 @@ const processedCommandIds=new Set();
 const deferredCommands=[];
 const pendingLocalCommands=new Map();
 let lastCommandRetryAt=0;
+let lastRemoteStateAt=0,lastStateRequestAt=0;
 
 function practiceModeFor(team){return role==="solo"&&team===localTeam;}
 function hasResources(team,cost){return (practiceModeFor(team)&&practiceInfiniteResources)||teamResources[team]>=cost;}
@@ -1131,6 +1132,7 @@ function updateAuthorityStatus(){
 function resetSnapshotFlow(){
   snapshotSequence=0;lastSnapshotAcked=0;lastSnapshotSent=0;
   pendingGuestSnapshot=null;lastGuestSnapshotSequence=-1;
+  lastRemoteStateAt=performance.now();lastStateRequestAt=0;
 }
 
 function shouldWarnBeforeExit(){
@@ -1408,11 +1410,19 @@ function cancelAuthorityHandoff(){
   flushDeferredCommands();
   sendSnapshot(true);
 }
+function cancelAuthorityRequest(){
+  if(handoffPending?.phase!=="requesting")return;
+  handoffPending=null;authoritySyncing=false;
+  const bothInactive=!localWindowActive&&!remoteWindowActive;
+  setPauseNotice(bothInactive,bothInactive?"양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다":"");
+  flushDeferredCommands();
+}
 function evaluateAuthorityState(){
   if(!isNetworkGame()||!started)return;
   if(!connected){authoritySyncing=true;setPauseNotice(true,"연결 복구 대기 · 게임 상태를 보존하고 있습니다");return;}
   if(authoritySyncing){
     if(localWindowActive&&handoffPending?.phase==="offered")cancelAuthorityHandoff();
+    else if(handoffPending?.phase==="requesting"&&(!localWindowActive||remoteWindowActive))cancelAuthorityRequest();
     return;
   }
   if(localIsAuthority()){
@@ -1431,7 +1441,9 @@ function evaluateAuthorityState(){
   }else if(localWindowActive&&!remoteWindowActive){
     authoritySyncing=true;
     setPauseNotice(true,"진행 권한 요청 중 · 상태 일치를 기다리는 중...");
-    sendPeer({t:"takeoverRequest",from:networkSide(),term:authorityTerm});
+    const message={t:"takeoverRequest",from:networkSide(),term:authorityTerm};
+    handoffPending={phase:"requesting",term:authorityTerm,to:authorityOwner,message,lastSent:performance.now()};
+    sendPeer(message);
   }else if(!localWindowActive&&!remoteWindowActive){
     setPauseNotice(true,"양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다");
   }
@@ -1441,6 +1453,7 @@ function handleAuthorityMessage(msg){
   if(msg.t==="presence"){
     if(msg.side===oppositeSide(networkSide())&&
       (!Number.isFinite(Number(msg.term))||Number(msg.term)===authorityTerm))remoteWindowActive=!!msg.active;
+    if(remoteWindowActive&&handoffPending?.phase==="requesting")cancelAuthorityRequest();
     evaluateAuthorityState();return true;
   }
   if(msg.t==="stateAck"){
@@ -1463,7 +1476,9 @@ function handleAuthorityMessage(msg){
   }
   if(msg.t==="handoffOffer"){
     if(msg.to!==networkSide()||msg.from!==authorityOwner||Number(msg.term)!==authorityTerm+1)return true;
-    if(!localWindowActive){sendPresence();return true;}
+    if(!localWindowActive){
+      sendPeer({t:"handoffDecline",from:networkSide(),to:msg.from,term:Number(msg.term)});sendPresence();return true;
+    }
     authoritySyncing=true;
     applyStateSnapshot(msg.state||{});
     authoritySyncing=true;
@@ -1471,6 +1486,15 @@ function handleAuthorityMessage(msg){
     const response={t:"handoffAccept",from:networkSide(),to:msg.from,term:Number(msg.term)};
     handoffPending={phase:"accepted",term:Number(msg.term),from:msg.from,navigationIncluded:!!msg.state?.navigationIncluded,message:response,lastSent:performance.now()};
     sendPeer(response);return true;
+  }
+  if(msg.t==="handoffDecline"){
+    if(handoffPending?.phase==="offered"&&msg.from===handoffPending.to&&Number(msg.term)===handoffPending.term){
+      handoffPending=null;authoritySyncing=false;
+      const bothInactive=!localWindowActive&&!remoteWindowActive;
+      setPauseNotice(bothInactive,bothInactive?"양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다":"");
+      flushDeferredCommands();evaluateAuthorityState();
+    }
+    return true;
   }
   if(msg.t==="handoffAccept"){
     if(handoffPending?.phase!=="offered"||msg.from!==handoffPending.to||Number(msg.term)!==handoffPending.term)return true;
@@ -1516,6 +1540,14 @@ function handleAuthorityMessage(msg){
   if(msg.t==="authorityResume"&&msg.owner===authorityOwner&&Number(msg.term)===authorityTerm){
     authoritySyncing=false;setPauseNotice(false);flushDeferredCommands();return true;
   }
+  if(msg.t==="stateRequest"){
+    if(msg.from===oppositeSide(networkSide())&&Number(msg.term)===authorityTerm&&localIsAuthority()&&!authoritySyncing){
+      const receivedSeq=Number(msg.lastSeq);
+      if(Number.isFinite(receivedSeq))lastSnapshotAcked=Math.max(lastSnapshotAcked,Math.min(receivedSeq,snapshotSequence));
+      sendSnapshot(true,true);
+    }
+    return true;
+  }
   return false;
 }
 function maintainAuthorityProtocol(now){
@@ -1529,6 +1561,11 @@ function maintainAuthorityProtocol(now){
       if(processedCommandIds.has(envelope.id)){pendingLocalCommands.delete(envelope.id);continue;}
       envelope.term=authorityTerm;envelope._lastSent=now;sendPeer(envelope);
     }
+  }
+  if(started&&!localIsAuthority()&&!authoritySyncing&&localWindowActive&&
+    now-lastRemoteStateAt>700&&now-lastStateRequestAt>450){
+    lastStateRequestAt=now;
+    sendPeer({t:"stateRequest",from:networkSide(),term:authorityTerm,lastSeq:lastGuestSnapshotSequence});
   }
 }
 
@@ -1633,11 +1670,11 @@ function connectionBufferedAmount(c=conn){
   const amount=Number(channel?.bufferedAmount);
   return Number.isFinite(amount)?amount:0;
 }
-function sendSnapshot(force=false){
+function sendSnapshot(force=false,bypassAckWindow=false){
   if(!isNetworkGame()||!localIsAuthority()||authoritySyncing||!connected) return;
   const now=performance.now();
   if(!force && now-lastSnapshotSent<SNAPSHOT_INTERVAL_MS) return; // 약 12.5Hz
-  if(snapshotSequence-lastSnapshotAcked>=(force?3:2))return;
+  if(!bypassAckWindow&&snapshotSequence-lastSnapshotAcked>=(force?3:2))return;
   const buffered=connectionBufferedAmount();
   const limit=force?SNAPSHOT_BUFFER_LIMIT*4:SNAPSHOT_BUFFER_LIMIT;
   if(buffered>limit)return; // 오래될 전체 상태를 신뢰성 채널에 계속 쌓지 않는다.
@@ -1742,6 +1779,7 @@ function queueHostMessage(msg){
   const pendingSeq=Number(pendingGuestSnapshot?.seq);
   if(Number.isFinite(seq)&&Number.isFinite(pendingSeq)&&seq<=pendingSeq)return;
   pendingGuestSnapshot=msg;
+  lastRemoteStateAt=performance.now();
 }
 function flushGuestSnapshot(){
   if(!isNetworkGame()||localIsAuthority()||!pendingGuestSnapshot)return;
@@ -4259,10 +4297,18 @@ function updateWindowActivity(){
   sendPresence();
   evaluateAuthorityState();
 }
+function confirmWindowInteractionActive(){
+  if(document.hidden||localWindowActive)return;
+  localWindowActive=true;
+  if(!isNetworkGame()||!started)return;
+  sendPresence();evaluateAuthorityState();
+}
 document.addEventListener("visibilitychange",updateWindowActivity);
 addEventListener("blur",updateWindowActivity);
 addEventListener("blur",()=>{minimapDragging=false;mouse.down=false;mouse.drag=false;});
 addEventListener("focus",updateWindowActivity);
+addEventListener("pointerdown",confirmWindowInteractionActive,{capture:true});
+addEventListener("keydown",confirmWindowInteractionActive,{capture:true});
 
 /* =========================
    렌더링

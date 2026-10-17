@@ -1080,7 +1080,7 @@ let localCommandSequence=0;
 const processedCommandIds=new Set();
 const deferredCommands=[];
 const pendingLocalCommands=new Map();
-let lastCommandRetryAt=0;
+let lastCommandRetryAt=0,lastPresenceSentAt=0;
 let lastRemoteStateAt=0,lastStateRequestAt=0;
 
 function practiceModeFor(team){return role==="solo"&&team===localTeam;}
@@ -1340,6 +1340,7 @@ function sendPeer(obj){
 }
 function sendPresence(){
   if(!isNetworkGame()||!connected)return;
+  lastPresenceSentAt=performance.now();
   sendPeer({t:"presence",side:networkSide(),active:localWindowActive,term:authorityTerm});
 }
 function rememberProcessedCommand(id){
@@ -1552,6 +1553,7 @@ function handleAuthorityMessage(msg){
 }
 function maintainAuthorityProtocol(now){
   if(!isNetworkGame()||!connected)return;
+  if(now-lastPresenceSentAt>1000)sendPresence();
   if(handoffPending&&now-handoffPending.lastSent>350){
     handoffPending.lastSent=now;sendPeer(handoffPending.message);
   }
@@ -1778,6 +1780,8 @@ function queueHostMessage(msg){
   if(Number.isFinite(seq)&&seq<=lastGuestSnapshotSequence)return;
   const pendingSeq=Number(pendingGuestSnapshot?.seq);
   if(Number.isFinite(seq)&&Number.isFinite(pendingSeq)&&seq<=pendingSeq)return;
+  remoteWindowActive=true;
+  if(handoffPending?.phase==="requesting")cancelAuthorityRequest();
   pendingGuestSnapshot=msg;
   lastRemoteStateAt=performance.now();
 }
@@ -5000,32 +5004,64 @@ function draw(){
    메인 루프
 ========================= */
 let last=performance.now();
+let lastFrameRecoveryAt=-Infinity;
+function repairFrameStateAfterError(phase,now){
+  for(const entity of [...units,...buildings]){
+    if(!Number.isFinite(entity.x))entity.x=Number.isFinite(entity.renderX)?entity.renderX:WORLD_W/2;
+    if(!Number.isFinite(entity.y))entity.y=Number.isFinite(entity.renderY)?entity.renderY:WORLD_H/2;
+    if(!Number.isFinite(entity.renderX))entity.renderX=entity.x;
+    if(!Number.isFinite(entity.renderY))entity.renderY=entity.y;
+    if(entity.kind==="unit"&&!Array.isArray(entity.orders))entity.orders=[];
+    if(entity.kind==="building"&&!Array.isArray(entity.queue))entity.queue=[];
+  }
+  projectiles=projectiles.filter(p=>Number.isFinite(p.x)&&Number.isFinite(p.y)&&Number.isFinite(p.life));
+  if(phase==="simulation"&&now-lastFrameRecoveryAt>500){
+    lastFrameRecoveryAt=now;clearNavigationCache();
+    for(const unit of units)invalidateNavPath(unit);
+  }
+  if(phase==="draw"){
+    if(typeof ctx.reset==="function")ctx.reset();
+    else{canvas.width=canvas.width;canvas.height=canvas.height;}
+  }
+}
+function handleFrameError(phase,error,now){
+  console.error(`[miniRTS ${phase} frame error]`,error);
+  globalThis.__miniRTSLastFrameError={phase,message:String(error?.message||error),stack:String(error?.stack||""),at:Date.now()};
+  repairFrameStateAfterError(phase,now);
+}
 function loop(now){
+  // 프레임 도중 예외가 발생해도 다음 렌더 예약은 반드시 남긴다.
+  requestAnimationFrame(loop);
   const dt=Math.min((now-last)/1000,.04);last=now;
-  flushGuestSnapshot();
-  maintainAuthorityProtocol(now);
-  updateCamera(dt);
-  lerpRenderEntities(dt);
+  try{
+    flushGuestSnapshot();
+    maintainAuthorityProtocol(now);
+    updateCamera(dt);
+    lerpRenderEntities(dt);
+  }catch(error){handleFrameError("network",error,now);}
 
   const authoritative=localIsAuthority();
   if(started&&authoritative&&!authoritySyncing&&!gameOver&&!gamePaused){
-    const nowSec=now/1000;
-    beginNavigationFrame(now);
-    updateUnits(dt,nowSec);
-    processNavigationJobs();
-    updateBuildings(dt,nowSec);
-    updateProjectiles(dt);
-    updateSoloAI(dt);
-    removeDead();
-    checkGameOver();
+    try{
+      const nowSec=now/1000;
+      beginNavigationFrame(now);
+      updateUnits(dt,nowSec);
+      processNavigationJobs();
+      updateBuildings(dt,nowSec);
+      updateProjectiles(dt);
+      updateSoloAI(dt);
+      removeDead();
+      checkGameOver();
+    }catch(error){handleFrameError("simulation",error,now);}
   }
-  if(authoritative)updateFloating(dt);
-  if(isNetworkGame()&&!authoritative&&started&&!gamePaused)updateGuestInteractionEffects(dt);
-  if(!gamePaused)updateVisualEffects(dt);
-  if(isNetworkGame()&&authoritative)sendSnapshot(false);
-  updateGameOverActions();
-  draw();
-  requestAnimationFrame(loop);
+  try{
+    if(authoritative)updateFloating(dt);
+    if(isNetworkGame()&&!authoritative&&started&&!gamePaused)updateGuestInteractionEffects(dt);
+    if(!gamePaused)updateVisualEffects(dt);
+    if(isNetworkGame()&&authoritative)sendSnapshot(false);
+    updateGameOverActions();
+  }catch(error){handleFrameError("effects",error,now);}
+  try{draw();}catch(error){handleFrameError("draw",error,now);}
 }
 requestAnimationFrame(loop);
 

@@ -1270,6 +1270,7 @@ function startGuest(hostId){
   peer.on("open",()=>{
     let authenticated=false,rejected=false;
     conn=peer.connect(hostId,{reliable:true,serialization:"json"});
+    const guestConnection=conn;
     conn.on("open",()=>{
       const token=localStorage.getItem(guestTokenKey(hostId))||"";
       conn.send({t:"auth",token});
@@ -1296,7 +1297,7 @@ function startGuest(hostId){
       if(authenticated)queueHostMessage(msg);
     });
     conn.on("close",()=>{
-      if(conn!==c)return;
+      if(conn!==guestConnection)return;
       if(pendingGuestSnapshot&&!localIsAuthority())flushGuestSnapshot();
       connected=false; connectionLost=true;
       authoritySyncing=true;gamePaused=true;handoffPending=null;
@@ -1393,7 +1394,7 @@ function beginAuthorityHandoff(to){
   const term=authorityTerm+1;
   authoritySyncing=true;
   setPauseNotice(true,"진행 권한 인계 중 · 최신 상태 동기화...");
-  const state=exportState(0);
+  const state=exportState(0,true);
   state.authorityOwner=to;state.authorityTerm=term;state.paused=true;
   const message={t:"handoffOffer",from:networkSide(),to,term,state};
   handoffPending={phase:"offered",term,to,message,lastSent:performance.now()};
@@ -1438,7 +1439,8 @@ function evaluateAuthorityState(){
 function handleAuthorityMessage(msg){
   if(!msg||typeof msg!=="object")return false;
   if(msg.t==="presence"){
-    if(msg.side===oppositeSide(networkSide()))remoteWindowActive=!!msg.active;
+    if(msg.side===oppositeSide(networkSide())&&
+      (!Number.isFinite(Number(msg.term))||Number(msg.term)===authorityTerm))remoteWindowActive=!!msg.active;
     evaluateAuthorityState();return true;
   }
   if(msg.t==="stateAck"){
@@ -1453,6 +1455,7 @@ function handleAuthorityMessage(msg){
     return true;
   }
   if(msg.t==="takeoverRequest"){
+    if(msg.from!==oppositeSide(networkSide())||Number(msg.term)!==authorityTerm){sendPresence();return true;}
     remoteWindowActive=true;
     if(localIsAuthority()&&!localWindowActive&&!authoritySyncing)beginAuthorityHandoff(msg.from);
     else sendPresence();
@@ -1466,7 +1469,7 @@ function handleAuthorityMessage(msg){
     authoritySyncing=true;
     setPauseNotice(true,"진행 권한 인계 확인 중...");
     const response={t:"handoffAccept",from:networkSide(),to:msg.from,term:Number(msg.term)};
-    handoffPending={phase:"accepted",term:Number(msg.term),from:msg.from,message:response,lastSent:performance.now()};
+    handoffPending={phase:"accepted",term:Number(msg.term),from:msg.from,navigationIncluded:!!msg.state?.navigationIncluded,message:response,lastSent:performance.now()};
     sendPeer(response);return true;
   }
   if(msg.t==="handoffAccept"){
@@ -1484,10 +1487,11 @@ function handleAuthorityMessage(msg){
     if(authorityOwner===networkSide()&&term===authorityTerm&&!authoritySyncing){
       sendPeer({t:"handoffReady",owner:authorityOwner,term:authorityTerm});return true;
     }
+    const preserveNavigation=handoffPending?.phase==="accepted"&&handoffPending.navigationIncluded;
     authorityOwner=networkSide();authorityTerm=term;authoritySyncing=false;handoffPending=null;
     resetSnapshotFlow();
     clearNavigationCache();
-    for(const unit of units)invalidateNavPath(unit);
+    if(!preserveNavigation)for(const unit of units)invalidateNavPath(unit);
     setPauseNotice(!localWindowActive,!localWindowActive?
       "양쪽 창이 백그라운드입니다 · 한쪽이 복귀하면 재개합니다":"");
     sendPeer({t:"handoffReady",owner:authorityOwner,term:authorityTerm});
@@ -1590,10 +1594,10 @@ hostBtn.onclick=startHost;
 soloBtn.onclick=startSolo;
 if(joinId) startGuest(joinId);
 
-function exportState(sequence=snapshotSequence){
+function exportState(sequence=snapshotSequence,includeNavigation=false){
   return {
     t:"state",
-    seq:sequence,authorityOwner,authorityTerm,
+    seq:sequence,authorityOwner,authorityTerm,navigationIncluded:includeNavigation,
     nextId,
     units:units.filter(u=>u.hp>0).map(u=>({
       id:u.id,type:u.type,team:u.team,x:u.x,y:u.y,hp:u.hp,maxHp:u.maxHp,radius:u.radius,
@@ -1601,7 +1605,13 @@ function exportState(sequence=snapshotSequence){
       carry:u.carry,gatherPhase:u.gatherPhase,gatherTick:u.gatherTick,lastGatherNodeId:u.lastGatherNodeId||null,
       loadedIn:u.loadedIn||null,cargoIds:Array.isArray(u.cargoIds)?u.cargoIds.slice():undefined,
       facing:u.facing,turretFacing:u.turretFacing,fireSerial:u.fireSerial||0,
-      fireTargetId:u.fireTargetId||null,fireTargetX:u.fireTargetX,fireTargetY:u.fireTargetY,fireEffectKind:u.fireEffectKind
+      fireTargetId:u.fireTargetId||null,fireTargetX:u.fireTargetX,fireTargetY:u.fireTargetY,fireEffectKind:u.fireEffectKind,
+      ...(includeNavigation?{
+        navPath:(u.navPath||[]).map(point=>({...point})),navPathIndex:u.navPathIndex||0,navPathKey:u.navPathKey||"",
+        navPathFailedKey:u.navPathFailedKey||"",navPathRetry:u.navPathRetry||0,navPathRadius:u.navPathRadius||u.radius,
+        navGoalX:Number.isFinite(u.navGoalX)?u.navGoalX:u.x,navGoalY:Number.isFinite(u.navGoalY)?u.navGoalY:u.y,
+        navGoalProjected:!!u.navGoalProjected,navWaiting:!!u.navWaiting
+      }:{})
     })),
     buildings:buildings.filter(b=>b.hp>0).map(b=>({
       id:b.id,type:b.type,name:b.name,team:b.team,x:b.x,y:b.y,radius:b.radius,vision:b.vision,
@@ -4242,7 +4252,9 @@ function updateCamera(dt){
 
 /* 활성 화면만 시뮬레이션을 진행하도록 양쪽 창 상태를 교환하고 권한을 인계한다. */
 function updateWindowActivity(){
-  localWindowActive=currentWindowActive();
+  const nextActive=currentWindowActive();
+  if(nextActive===localWindowActive)return;
+  localWindowActive=nextActive;
   if(!isNetworkGame()||!started)return;
   sendPresence();
   evaluateAuthorityState();
@@ -4293,7 +4305,7 @@ function lerpRenderEntities(dt){
     if(isNetworkGame()&&!localIsAuthority()){
       e.renderX+=(e.x-e.renderX)*positionK;
       e.renderY+=(e.y-e.renderY)*positionK;
-    }
+    }else{e.renderX=e.x;e.renderY=e.y;}
     if(Number.isFinite(e.facing)){
       if(!Number.isFinite(e.renderFacing))e.renderFacing=e.facing;
       e.renderFacing=lerpAngle(e.renderFacing,e.facing,rotationK);

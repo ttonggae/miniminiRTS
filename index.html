@@ -2945,6 +2945,14 @@ function hasLineOfSight(ax,ay,bx,by){
   }
   return true;
 }
+function hasAttackLineOfSight(ax,ay,bx,by){
+  const dx=bx-ax,dy=by-ay,len=Math.hypot(dx,dy),steps=Math.ceil(len/18);
+  for(let i=1;i<steps;i++){
+    const t=tileAtWorld(ax+dx*(i/steps),ay+dy*(i/steps));
+    if(t===WALL||t===VOID)return false;
+  }
+  return true;
+}
 let visionSourceFrameCache=[null,null],visionPointFrameCache=[new Map(),new Map()],visibilityFrameCacheEnabled=false;
 function beginVisibilityFrame(enabled=true){
   visibilityFrameCacheEnabled=enabled;
@@ -3001,17 +3009,26 @@ function startGather(u,node){
   u.gatherPhase="toNode"; u.gatherTick=0;
   invalidateNavPath(u);
 }
-function nearestAvailableResourceNode(x,y,excludeId=null){
+function assignedGatherWorkerCount(nodeId,excludeWorkerId=null){
+  return units.filter(u=>{
+    if(u.id===Number(excludeWorkerId)||u.hp<=0||u.loadedIn||u.type!=="worker")return false;
+    const order=u.orders[0];
+    return order?.type==="gather"&&Number(order.targetId)===Number(nodeId)||
+      order?.type==="returnResources"&&Number(order.resumeNodeId)===Number(nodeId);
+  }).length;
+}
+function nearestAvailableResourceNode(x,y,excludeId=null,workerId=null){
   let best=null,bestDistance=Infinity;
   for(const node of resourceNodes){
-    if(node.id===Number(excludeId)||Number(node.amount)<=0)continue;
+    if(node.id===Number(excludeId)||Number(node.amount)<=0||
+      assignedGatherWorkerCount(node.id,workerId)>=MAX_MINERS_PER_NODE)continue;
     const distance=Math.hypot(node.x-x,node.y-y);
     if(distance<bestDistance){best=node;bestDistance=distance;}
   }
   return best;
 }
 function redirectGatherToNearest(u,exhaustedNodeId){
-  const next=nearestAvailableResourceNode(u.x,u.y,exhaustedNodeId);
+  const next=nearestAvailableResourceNode(u.x,u.y,exhaustedNodeId,u.id);
   if(!next)return false;
   startGather(u,next);return true;
 }
@@ -3056,7 +3073,8 @@ function startResourceReturn(u,dropoff,resumeNodeId=resourceResumeNodeId(u)){
 }
 function resumeResourceLoop(u,nodeId=resourceResumeNodeId(u)){
   let node=getResourceNode(Number(nodeId));
-  if(!node||node.amount<=0)node=nearestAvailableResourceNode(u.x,u.y,node?.id||nodeId);
+  if(!node||node.amount<=0||assignedGatherWorkerCount(node.id,u.id)>=MAX_MINERS_PER_NODE)
+    node=nearestAvailableResourceNode(u.x,u.y,node?.id||nodeId,u.id);
   if(node)u.lastGatherNodeId=node.id;
   if(u.carry>0){
     const dropoff=nearestResourceDropoff(u.team,u.x,u.y);
@@ -3105,7 +3123,7 @@ function nearestAttackable(u,maxRange){
   for(const e of [...units,...buildings]){
     if(e.hp<=0||e.loadedIn||e.team===u.team||!canAttackTarget(u,e)) continue;
     const d=Math.hypot(e.x-u.x,e.y-u.y)-e.radius;
-    if(d<=maxRange&&d<bd&&hasLineOfSight(u.x,u.y,e.x,e.y)&&entityVisibleTo(u.team,e)){
+    if(d<=maxRange&&d<bd&&hasAttackLineOfSight(u.x,u.y,e.x,e.y)&&entityVisibleTo(u.team,e)){
       best=e;bd=d;
     }
   }
@@ -3567,7 +3585,7 @@ function updateAttackTarget(u,o,dt,nowSec){
   if(visible){o.x=target.x;o.y=target.y;}
   const tx=visible?target.x:o.x,ty=visible?target.y:o.y;
   const distance=Math.hypot(target.x-u.x,target.y-u.y)-target.radius;
-  const lineClear=visible&&hasLineOfSight(u.x,u.y,target.x,target.y);
+  const lineClear=visible&&hasAttackLineOfSight(u.x,u.y,target.x,target.y);
   if(lineClear&&distance<=UNIT_TYPES[u.type].range){
     fireAt(u,target,nowSec);
   }else{
